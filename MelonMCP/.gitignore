@@ -1,0 +1,27 @@
+# Build outputs
+bin/
+obj/
+*.dll
+*.pdb
+*.exe
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.docstates
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Package caches
+packages/
+*.nupkg
+
+# Logs
+*.log
+
+# Game-specific knowledge (contains user data)
+game_knowledge/
