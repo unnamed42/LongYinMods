@@ -3,17 +3,74 @@
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>FriendlyNoclip</AssemblyName>
-    <LangVerson>10.0</LangVersion>
+    <RootNamespace>Unnamed42.FriendlyNoclip</RootNamespace>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <OutputType>Library</OutputType>
+    <Deterministic>true</Deterministic>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <Version>1.0.0</Version>
+    <Authors>unnamed42</Authors>
+    <Description>移动时允许穿越友方和城防</Description>
+
     <GameDir>..\gamedir</GameDir>
     <Il2cppDir>..\gamedir\MelonLoader\Il2CppAssemblies</Il2cppDir>
     <MelonLoaderDir>..\gamedir\MelonLoader\net6</MelonLoaderDir>
   </PropertyGroup>
 
   <ItemGroup>
+    <Reference Include="MelonLoader">
+      <HintPath>$(MelonLoaderDir)\MelonLoader.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="0Harmony">
       <HintPath>$(MelonLoaderDir)\0Harmony.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(MelonLoaderDir)\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(Il2cppDir)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(Il2cppDir)\Il2Cppmscorlib.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem.Core">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(Il2cppDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(Il2cppDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(Il2cppDir)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="MelonLoader.MelonInfo">
+      <_Parameter1>Unnamed42.FriendlyNoclip.Plugin</_Parameter1>
+      <_Parameter1_TypeName>System.Type</_Parameter1_TypeName>
+      <_Parameter2>$(Description)</_Parameter2>
+      <_Parameter3>$(Version)</_Parameter3>
+      <_Parameter4>$(Authors)</_Parameter4>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>
