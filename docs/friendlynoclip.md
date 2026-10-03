@@ -6,7 +6,9 @@
 >
 > 通用工具用法见 `AGENTS.md`，不重复。
 
-**状态**：✅ **功能已闭环**（2026-10-05，用户 m01137 确认）。
+**状态**：✅ **「穿越友方」+「穿越不留痕」已闭环**（用户 m01137 确认）。
+⚠️ **「穿越己方城墙」代码已完成，但尚未实机验证** —— 判据需要 `obstale.teamID == selfTeamID`，
+即玩家守城的战斗。已完成的只是回归验证：当前攻方场景下「不崩 + 穿不过敌方城墙 + 穿友方正常」。详见 §8。
 
 ---
 
@@ -39,17 +41,19 @@
 
 ```toml
 [FriendlyNoclip]
-native_detour = true      # ★ 必须 true —— 「能穿友方」的能力本身
-fix_occupancy = true      # ★ 必须 true —— 「穿越不留痕」
+native_detour = true      # ★ 「能穿友方」的能力本身
+wall_pass     = true      # ★ 「能穿己方城墙」
+fix_occupancy = true      # ★ 「穿越不留痕」
 diagnostics   = false     # 平时关掉，日志量大
 dump_all_grids = false    # 极慢，排查用
 ```
 
-> ⚠️ **这两个开关的分工必须分清**（曾因混淆而误判一轮）：
+> ⚠️ **三个功能性开关的分工必须分清**（曾因混淆而误判一轮）：
 
 | 开关 | 作用 | 关掉会怎样 |
 |---|---|---|
-| `native_detour` | `MapNavigator.Navigate` 内 `0x180a8d929` 的 Dobby detour，**允许穿过友方** | **穿不过去** |
+| `native_detour` | `Navigate` 内 `0x180a8d929` 的 detour，**允许穿过友方单位** | **穿不过友方** |
+| `wall_pass` | `Navigate` 内 `0x180a8d8b6` 的 detour，**允许穿过己方城墙** | 穿不过己方城墙（其余不受影响） |
 | `fix_occupancy` | `EnterGrid` Prefix + `OnLeave` Postfix，**写回被踩掉的登记** | 能穿，但**被穿的 NPC 点不动** |
 
 ### 2.2 能力来源：「只穿友方」的原生 detour
@@ -69,9 +73,66 @@ dump_all_grids = false    # 极慢，排查用
 
 **为什么改这里**：`MapNavigator` 同时服务「范围高亮」和「点击寻路」，**只改一处不会出现「格子亮了却走不过去」的分裂**。
 
-`FriendlyNoclip/NativeDetour.cs` 在 `0x180a8d929` 处装 detour，比较 `selfTeamID`（`[rsp+0xd8]`）与 `g.battleUnit.battleTeam.ID`，**同队放行、异队跳过**。
+`FriendlyNoclip/FriendlyPassHook.cs` 在 `0x180a8d929` 处装 detour，比较 `selfTeamID`（`[rsp+0xd8]`）与 `g.battleUnit.battleTeam.ID`，**同队放行、异队跳过**。
 
 hook 点常量：`VaHookSite = 0x180A8D929`、`VaSkip = 0x180A8DA6B`、`VaEmptyCell = 0x180A8D92F`、`VaExpand = 0x180A8D963`。
+
+### 2.2b 能力来源：「只穿己方城墙」的原生 detour
+
+**城墙比「存活单位」判定更早被排除** —— 所以穿友方那套逻辑根本碰不到城墙（实测：装了穿友方之后，NPC 能穿、城墙依然不能穿，**敌我双方都不能**）。
+
+拦截点在同一个 `Navigate` 内，但位置更前：
+
+```asm
+0x180a8d8a1  call 0x1808c8a50          ; GetGridDataByDir -> 邻格 g (rax/rsi)
+0x180a8d8a9  test rax, rax
+0x180a8d8ac  je   0x180a8da6b          ; g == null          -> skip
+0x180a8d8b2  cmp  dword [rax+0x14], 2   ; g.gridType == Obstacle ?
+0x180a8d8b6  je   0x180a8da6b          ; ★ 本 hook 点：障碍格一律 skip
+0x180a8d8bc  ...                        ; 非障碍格：继续原逻辑（fall-through）
+```
+
+Ghidra 反编译把它重构成一个复合条件，**证实两条 `je` 是同一逻辑的两个分支**：
+```c
+if ((plVar11 != 0) && (*(int *)((longlong)plVar11 + 0x14) != 2)) { ... }
+```
+
+**为什么 `gridType == Obstacle` 不够**：该分类同时包含城墙与**中立障碍**
+（造景 / 雕像 / 木箱 / 木桶 / 灌木）。现场实测：`obstacleGrids` 共 31 个，
+其中 `obstalceType = Normal, teamID = -1` 的 13 个，`Wall, teamID = 1` 的 18 个。
+游戏对二者一视同仁地阻挡，**所以那一行不读 `teamID`**。
+→ 判据必须下沉到 `ObstacleData`，只放行城墙。
+
+**字段偏移（MCP 在活进程读出 + 原生内存交叉验证）**：
+
+| 字段 | 偏移 | 取值 |
+|---|---|---|
+| `GridUnitData.gridType` | `+0x14` | `None=0, Normal=1, Obstacle=2` |
+| `GridUnitData.obstale` | `+0x30` | `ObstacleData*`，可能为 0 |
+| `ObstacleData.obstalceType` | `+0x10` | `Normal=0, Wall=1` |
+| `ObstacleData.teamID` | `+0x2C` | 中立 `-1`；城墙现场观测为 `1` |
+
+**判据 = 己方城墙**：`obstalceType == Wall(1) && teamID == selfTeamID`。
+因为有 `selfTeamID` 参与，**守方 AI 自动获得穿越自己城墙的能力**，
+与用户「每个 AI 都要有这个能力」的一贯要求一致，无需额外处理。
+
+**不会误伤箭塔 / 战鼓 / 分舵**：现场实测它们是**普通 `BattleUnit`**
+（挂在 `g.battleUnit`，且 `g.obstale == null`）—— 本钩子在 `obstale == null` 时直接回 `skip`，
+碰不到它们；它们归 §2.2 那条线按队伍处理。
+
+**stub 的出口**（本项目第二个 native stub）：
+
+| 情况 | 去向 |
+|---|---|
+| `gridType != Obstacle` | → `0x180a8d8bc`（**fall-through**，必须保留 `rax`） |
+| `obstale == null` | → `0x180a8da6b`（skip，保持原行为） |
+| `obstalceType != Wall`（中立障碍） | → skip |
+| `teamID != selfTeamID`（他方城墙） | → skip |
+| **己方城墙** | → `0x180a8d963`（expand，放行） |
+
+⚠️ **实测现状**：己方城墙走 `expand` 这条路径**尚未在实机验证过**
+（需要一场「玩家守城」的战斗，那时 `teamID == selfTeamID` 才会成立）。
+Ghidra 显示 `expand` 之后有两处 `il2cpp_raise_null_ref` 崩溃出口，**需警惕**。
 
 ### 2.3 「穿越不留痕」：纯托管层的两步配合
 
@@ -113,8 +174,9 @@ hook 点常量：`VaHookSite = 0x180A8D929`、`VaSkip = 0x180A8DA6B`、`VaEmptyC
 
 **为什么不用旁表**（用户 m00784 提问「旁表的生命周期怎么维护？那是不是还要 hook 掉战斗开始/结束？」）：旁表要正确必须跟踪战斗开始/结束/死亡/撤销，其中好几个不在 `OnLeave`/`OnEnter` 路径上，复杂度不划算且引入失步风险。→ **改用判据完全局部的方案。**
 
-### 2.4 当前挂载的 6 个 Harmony 补丁
+### 2.4 当前挂载的补丁（6 个 Harmony + 2 个 native detour）
 
+**Harmony：**
 ```
 BattleMapData.GetMoveRangeGrids        -> Postfix  （审计）
 GridUnitController.set_GridRenderType  -> Prefix   （审计/染色）
@@ -122,6 +184,12 @@ BattleController.BattleGridClicked     -> Prefix   （审计/点击）
 GridUnitData.OnLeave                   -> Prefix   （[命中] 计数 + [登记] 诊断）
 GridUnitData.OnLeave                   -> Postfix  （★ 穿越不留痕：写回原主）
 BattleUnit.EnterGrid                   -> Prefix   （★ 穿越不留痕：记录被覆盖的原主）
+```
+
+**Native detour（均在 `MapNavigator.Navigate` 内）：**
+```
+FriendlyPassHook  -> 0x180a8d929（存活单位判定）  ★ 穿友方
+WallPassHook      -> 0x180a8d8b6（障碍格判定）    ★ 穿己方城墙
 ```
 
 ---
@@ -342,6 +410,13 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 11. **不要和尾调用（tail call）较劲**。`OnEnter` 以 `jmp 0x180870420` 结尾，自建 detour stub 无法与共享尾部块共存。**遇到这种函数就用 Harmony。**
 12. **Prefix 写回是无效的**（原函数体随后会覆盖），**Postfix 里读「本格当前值」也是无效的**（`OnLeave` 语义下它天然是 null）。这两条各浪费过一轮。
 13. **取证要打「不受门控」的计数器**。`[命中] OnLeave 第 N 次` 这种计数器是本项目定位问题的关键工具。
+14. **hook 在「条件跳转」上时，必须自己重判那个条件**。`0x180a8d8b6` 是 `je`，它在 `gridType == Obstacle` 与 `!= Obstacle` **两种情况下都会被执行**。初期只处理了前者，把普通格也归入「无障碍物数据 → skip」，后果是**移动范围只剩脚下那一格**（实机复现）。
+15. **stub 的出口跳转不能用 `rax` 中转**。`fallThrough`(`0x180a8d8bc`) 是紧跟 `cmp` 的**原有代码**，它依赖 `cmp` 留下的 `rax` = 邻格指针；而 `mov rax,imm64; jmp rax` 会把 `rax` 改成代码地址 → `mov r9,[rax]` 读到代码字节当类指针 → SIGSEGV。
+    gdb 现场：`rip=0x180a8d8ca`（`mov r8,[r9+0x140]`）、`rax=rcx=0x180a8d8bc`。
+    → 改用 `EmitJumpViaR11`（`mov r11,imm64; jmp r11`）。**判据：目标是否是一段原有的代码，且它是否读 `rax`。**
+16. **偏移不要手算**。stub 的 rel8 回填曾因「指令布局改了、偏移没跟着改」而错乱。
+    现改为：发射时 `AddRel8()` 返回实际偏移 → `PatchRel8()` 回填 → `VerifyStub()` 反查每条跳转的目的地。
+    算错会在安装瞬间写入 `ERROR` 日志，而不是变成玄学现象。
 
 ---
 
@@ -366,6 +441,9 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 | 在 `GridUnitData.OnEnter` 上装自建 native detour | **一进战斗即崩**。`OnEnter` 以尾调用结尾，自建 stub 的帧使得到达共享尾部块时 `rsp` 低 0x30，`xmm6`/`r15`/`r14` 从垃圾内存恢复。Dobby 跳板对尾调用语义零处理 → **根本矛盾** |
 | 把写回放在 `OnLeave` 的 **Prefix** | 原函数第一条指令就是 `[grid+0x18] = 0`，写回被立刻抹掉。**必须用 Postfix** |
 | 修复判据用「本格当前 == 穿越者」 | Postfix 里 `grid.battleUnit` **天然是 null**，该条件永不成立 → 每次都「跳过」。**判据必须看原主自己的 `mapGrid`** |
+| 城防 hook 用 `gridType == Obstacle` 作判据 | 该分类含**中立障碍**（造景/木桶…），会连树一起放行。**必须下沉到 `obstalceType == Wall`** |
+| 城防 stub **漏掉非障碍格分支** | 移动范围只剩脚下那一格。`je` 在两种 `gridType` 下都会执行，stub 必须自己重判并回 `0x180a8d8bc` |
+| stub 出口用 **`rax` 中转** | `fallThrough` 依赖 `cmp` 留下的 `rax`；被改成代码地址后 `mov r9,[rax]` 读到代码字节 → SIGSEGV（`rip=0x180a8d8ca`）。**必须用 `r11`** |
 | 用 Reloaded.Assembler 替代硬编码 x86 字节 | 收益不足（见 §7） |
 | 直接写 `GridUnitData+0x18` 的野写者 | 全镜像扫描**零命中** |
 | `MethodAddressToToken.db` 取原生地址 | 两侧都是 token，是 token→token 映射 |
@@ -386,12 +464,15 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 ## 6. 代码状态
 
 **构建**：`dotnet build FriendlyNoclip/FriendlyNoclip.csproj -c Debug`
-**产物**：`FriendlyNoclip/bin/Debug/net6.0/FriendlyNoclip.dll`，md5 `9f160ed5f24002968e5138a54fbd2d49`，**0 错误 0 警告**。
+**产物**：`FriendlyNoclip/bin/Debug/net6.0/FriendlyNoclip.dll`，md5 **`79ae85f82992323a8e4fd2aeb7d402f2`**，46592 字节，**0 错误 0 警告**。
+
+> ⚠️ 部署后**务必核对 md5** —— 本项目因测了旧 DLL 而白耗过两轮。
 
 | 文件 | 状态 |
 |---|---|
-| `FriendlyNoclip/Plugin.cs`（约 1915 行） | **主逻辑**。审计探针、`Navigate` detour 接线、`EnterGrid` Prefix、`OnLeave` Prefix+Postfix |
-| `FriendlyNoclip/NativeDetour.cs`（356 行） | **有效** —— `Navigate` @ `0x180a8d929` 的 Dobby detour（让「只穿友方」生效的那个） |
+| `FriendlyNoclip/NativeHookBase.cs` | **抽象基类** —— 安装/卸载骨架 + 共用工具（`RuntimeVa` / `EmitAbsoluteJump` / `EmitJumpViaR11` / `IsRel32Jcc` / `BytesEqual` / `Hex`）。子类只写差异：`Tag` / `HookVa` / `OriginalBytes` / `ValidateSite` / `BuildStub` |
+| `FriendlyNoclip/FriendlyPassHook.cs` | **穿友方** —— hook `0x180a8d929`，按 `battleTeam.ID` 判队伍 |
+| `FriendlyNoclip/WallPassHook.cs` | **穿己方城墙** —— hook `0x180a8d8b6`，按 `obstalceType + teamID` 判；含 `AddRel8`/`PatchRel8`/`VerifyStub` |
 | `FriendlyNoclip/NativeMemory.cs`（286 行） | **有效** —— 模块定位 / 签名扫描 / 原生读写 / `VirtualProtect` |
 
 **已删除**：`NativeOnEnterDetour.cs`（前提错误 + 尾调用崩溃）、`NativePatchProbe.cs`、`NativeProbe.cs`；开关 `native_probe` / `native_patch_probe` / `native_onenter_detour` / `allow_friendly`；函数 `CallerReturnAddress()`。
@@ -400,11 +481,49 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 
 **git 提交序列**：`acd50b7 initial commit` → `e8c8e65 feat: (incomplete) noclip for the friendly` → `38282f0 feat: 穿越友方 + 穿越不留痕（功能闭环）` → `98d8a17 chore: 清理配置项，只保留 4 个`。
 
-### 6.1 `NativeDetour.cs` 的硬编码字节（备查）
+### 6.1 两个 stub 的机器码布局（备查）
 
-- `OriginalBytes = { 0x0F, 0x85, 0x3C, 0x01, 0x00, 0x00 }`（`0x180a8d929` 处 6 字节 jcc rel32）
-- `BuildStub()` 布局：`+0` `test al,al`；`+2` `je <empty>`；`+4` `mov rax,[rsi+0x18]`；`+8` `test rax,rax`；`+11` `je <skip>`；`+13` `mov rax,[rax+0x58]`；`+17` `test rax,rax`；`+20` `je <skip>`；`+22` `mov eax,[rax+0x10]`；`+25` `cmp eax,[rsp+0xd8]`；`+32` `je <expand>`；随后三个 12 字节绝对跳转（`mov rax,imm64` + `jmp rax`）
-- 手动 rel8 回填：`code[3]=(byte)(emptyOff-(2+2)); code[12]=(byte)(skipOff-(11+2)); code[21]=(byte)(skipOff-(20+2)); code[33]=(byte)(expandOff-(32+2));`
+**【穿友方】`FriendlyPassHook`**（`0x180a8d929`）
+
+- `OriginalBytes = { 0x0F, 0x85, 0x3C, 0x01, 0x00, 0x00 }`（6 字节 `jne rel32`）
+- 布局：`+0` `test al,al`；`+2` `je <empty>`；`+4` `mov rax,[rsi+0x18]`；`+8` `test rax,rax`；`+11` `je <skip>`；`+13` `mov rax,[rax+0x58]`；`+17` `test rax,rax`；`+20` `je <skip>`；`+22` `mov eax,[rax+0x10]`；`+25` `cmp eax,[rsp+0xd8]`；`+32` `je <expand>`；随后三个 12 字节绝对跳转
+- 出口：`empty=0x180a8d92f`、`skip=0x180a8da6b`、`expand=0x180a8d963`
+- 这个 stub **用 `EmitAbsoluteJump`（经 rax）** —— 因为三个出口**都不读 `rax`**
+
+**【穿己方城墙】`WallPassHook`**（`0x180a8d8b6`，72 字节）
+
+- `OriginalBytes = { 0x0F, 0x84, 0xAF, 0x01, 0x00, 0x00 }`（6 字节 `je rel32`）
+- 布局：
+  ```
+  +0x00  cmp dword [rax+0x14], 2     ; gridType == Obstacle ?
+  +0x04  jne <fallThrough>           ; 非障碍格 -> 0x180a8d8bc（必须保留 rax）
+  +0x06  mov rcx, [rax+0x30]         ; g.obstale
+  +0x0a  test rcx, rcx
+  +0x0d  jz  <skip>
+  +0x0f  cmp dword [rcx+0x10], 1     ; obstalceType == Wall ?
+  +0x13  jne <skip>
+  +0x15  mov edx, [rcx+0x2c]         ; obstale.teamID
+  +0x18  cmp edx, [rsp+0xd8]         ; == selfTeamID ?
+  +0x1f  jne <skip>
+  +0x21  -> expand   (0x180a8d963)   ; 己方城墙 -> 放行
+  +0x2e  -> skip     (0x180a8da6b)
+  +0x3b  -> fallThrough (0x180a8d8bc)
+  ```
+- ⚠️ **三个出口全部用 `mov r11,imm64; jmp r11`**，`rax` 全程不动
+
+### 6.2 为什么会写成 `EmitJumpViaR11`（血泪）
+
+最初 `WallPassHook` 也用 `mov rax,imm64; jmp rax` 跳出口。结果：
+
+- `fallThrough`(`0x180a8d8bc`) 第一条指令是 `mov r9,[rax]` —— 它**期望 rax 仍是上一条 `cmp` 留下的邻格指针**
+- 但 `rax` 已被改成**代码地址** → `r9` = 代码字节被当成类指针 → `mov r8,[r9+0x140]` **SIGSEGV**
+- gdb 现场：`rip=0x180a8d8ca`、`rax=rcx=0x180a8d8bc`
+
+**判据**：若跳转目标是**一段原有的代码**（而不是你自己的标签），
+先查它是否读 `rax`；读则**必须**用 `r11`（或其他不被目标读取的易失寄存器）中转。
+
+**而且这类 bug 不会在安装时报错** —— 它表现为「移动范围只剩脚下那一格」或
+「某些情况下必崩」，静态看代码极难发现。所以 `VerifyStub()` 里的**跳转目标自检**是必要的。
 
 ---
 
@@ -451,9 +570,11 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 
 | # | 事项 | 状态 |
 |---|---|---|
-| 1 | 城墙/城防穿越（`ObstacleData.teamID`，`ObstacleType.Wall`） | 用户 m00566 **暂缓** —— 唯一剩余的功能性待办 |
-| 2 | **非战斗场景的回归验证** | 建议做：确认 mod 未影响大地图/其他界面的行为 |
-| 3 | 「穿越不留痕」的时序验证 | `OnLeave` 在**离开**时触发，而覆盖发生在 **`OnEnter`** 时刻。若游戏在两格之间做了别的读取（如渲染），修复可能**太晚**。判据：若出现「中途闪一下被穿单位的模型消失」，说明太晚 → 需转「手写 `OnEnter` 替代实现」 |
+| 1 | ~~城墙/城防穿越~~ | ✅ **代码已完成**（`WallPassHook`）。**但「己方城墙真的能穿」尚未实机验证** —— 需一场玩家守城的战斗 |
+| 2 | **⚠️ 验证 `expand` 路径**（当前最高优先） | 己方城墙会跳到 `0x180a8d963`。Ghidra 显示该路径之后有两处 `il2cpp_raise_null_ref` 崩溃出口。实测需 `obstale.teamID == selfTeamID`，即**玩家守城**。"已完成的验证"：当前攻方场景下「不崩 + 穿不过敌方城墙 + 穿友方正常」✓ |
+| 3 | **非战斗场景的回归验证** | 建议做：确认 mod 未影响大地图/其他界面的行为 |
+| 4 | 「穿越不留痕」的时序验证 | `OnLeave` 在**离开**时触发，而覆盖发生在 **`OnEnter`** 时刻。若游戏在两格之间做了别的读取（如渲染），修复可能**太晚**。判据：若出现「中途闪一下被穿单位的模型消失」，说明太晚 → 需转「手写 `OnEnter` 替代实现」 |
+| 5 | 箭塔/战鼓/分舵是否会被误穿 | 实测它们是**普通 `BattleUnit`**（`g.obstale == null`），归「穿友方」那条线按队伍处理。**当前无异常**，但守城战里需再看一眼 |
 
 ---
 

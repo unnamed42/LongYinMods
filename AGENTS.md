@@ -261,10 +261,22 @@ def typedef(name):
 - Ghidra **12.1.2** @ `/opt/ghidra`，启动器 `/usr/bin/ghidra`
 - **工程**：`output/ghidra_proj/LongYin`（headless 用）
 
-**批量反编译脚本 `output/dumper_out/DecompMany.py`**（本项目自建，**必须用 `-postScript` + 脚本参数**）：
+> ⚠️ **必须用 `.java` 版脚本，不能用 `.py`**。Ghidra 12.1.2 默认把 `.py` 路由给 **PyGhidra**，
+> 而本机**未安装 PyGhidra**，会报：
+> ```
+> ERROR REPORT SCRIPT ERROR: DecompMany.py : Ghidra was not started with PyGhidra.
+> Python is not available
+> ```
+> 本项目已将脚本改写为 **`output/dumper_out/DecompMany.java`**（GhidraScript 的 Java API
+> 与 Jython 几乎一一对应）。**以后再写 Ghidra 脚本，直接写 `.java`。**
+>
+> 另注：Ghidra 启动时会写 `~/.config/ghidra/`（`java_home.save`、`application.log`），
+> **沙箱只读时需要提权**，否则报 `FileNotFoundException: ... java_home.save (只读文件系统)`。
+
+**批量反编译脚本 `output/dumper_out/DecompMany.java`**（本项目自建，**必须用 `-postScript` + 脚本参数**）：
 
 ```
-用法：-postScript DecompMany.py <outdir> <addr1> <name1> <addr2> <name2> ...
+用法：-postScript DecompMany.java <outdir> <addr1> <name1> <addr2> <name2> ...
 ```
 
 ```bash
@@ -273,7 +285,7 @@ def typedef(name):
     -process GameAssembly.dll \
     -noanalysis \
     -scriptPath $PWD/output/dumper_out \
-    -postScript DecompMany.py \
+    -postScript DecompMany.java \
         $PWD/output/decomp_gud \
         0x180000000 SomeFunction \
         0x180000000 OtherFunction
@@ -429,6 +441,9 @@ nativeDetour.Apply();
 - **热重载对代码段改写无效**：`Marshal.Copy` 写过的代码段不会被 Harmony 热重载还原；且模块基址每次启动都变 → **改原生代码后必须冷启动**。
 - **装 detour 前先校验目标字节**。本项目一个探针模块因为**字节校验正确地拒绝了安装**，才没有在已被 Il2CppInterop 占据的入口上叠第二层 detour。**这个校验模式值得保留。**
 - ⚠️ **原生 detour 与尾调用（tail call）不兼容**。若目标函数以 `jmp <shared_tail>` 结尾，自建 stub 压帧会让到达共享尾部块时 `rsp` 偏移错误，被恢复的寄存器（`xmm6`/`r15`/`r14` 之类）来自垃圾内存 → 一运行即崩。**Dobby 的跳板只处理「跳回原函数」，对尾调用语义零处理。** 遇到这种函数改用 Harmony。
+- ⚠️ **hook 在「条件跳转」上时，stub 必须自己重判那个条件**。`jcc` 在两种情况下都会被执行，只处理「跳」的那一侧会把「不跳」的路径也劫持 → 行为全面错乱（实测：移动范围只剩脚下那一格）。
+- ⚠️ **stub 的出口跳转不要用 `rax` 中转**，除非确认目标不读它。`mov rax,imm64; jmp rax` 会把 `rax` 改成代码地址；而目标如果是一段**原有代码**，它常常依赖上一条指令在 `rax` 里留下的值 → 把代码字节当指针解引用 → SIGSEGV。改用 `mov r11,imm64; jmp r11`（`r11` 是 Win64 易失寄存器，且很少被读）。
+- ⚠️ **stub 的 rel8 偏移不要写死为 `code[N]`**。改成「发射时记下偏移 → 回填 → **自检跳转目标**」三步；算错会在安装瞬间打 `ERROR` 日志，而不是变成玄学现象（本项目两个 inline stub 都因此受益）。
 
 ### 6.2 运行时读类型描述符槽（强烈推荐，省掉手写机器码）
 
@@ -477,9 +492,24 @@ IL2CPP.il2cpp_type_get_name_(IntPtr type)
 
 **可以对运行中的游戏执行 C# 表达式、直接读写活对象** —— 排查效率远高于读日志。
 
-- 服务端源码在 `MelonMCP/`（本项目自建，含 Mono.CSharp REPL，可执行完整 C# 语句）。
-- 核心工具：`execute_csharp` / `evaluate_expression` / `find_objects_of_type` / `list_game_objects` / `read_logs` / `get_type_info` / `inspect_component` / `take_screenshot`。
+- 服务端源码在 `MelonMCP/`（本项目自建，Mono.CSharp REPL 已 ILRepack 内嵌，可执行完整 C# 语句）。
+- **核心工具**：`execute_csharp` / `evaluate_expression` / `find_objects_of_type` / `list_game_objects` / `get_type_info` / `list_types` / `list_assemblies` / `read_logs`。
+- **排查补丁用的工具**（2026-10 新增）：`hook_patch_info`（补丁挂载/触发/生效 + patcher 类型 + 入口字节）、`list_patches`（全进程补丁清单，含其他 mod）、`disasm` / `read_mem` / `resolve_jump`（**运行时**字节与跳转解析）、`watch_field` / `unwatch_field`（轮询字段变化）。
 - 还有**持久化的知识库**：`get_game_knowledge` / `add_game_knowledge`，按游戏名分类保存「同类调查结论」，下次 session 直接查。
+
+⚠️ **已禁用的工具（不要再尝试，它们会让 MCP 客户端看到一个名字却永远失败）**：
+
+| 工具 | 禁用原因 |
+|---|---|
+| `list_components` / `inspect_component` | IL2CPP 下组件列表塌缩为 `UnityEngine.Component` 代理，所有组件都报成 `Component`，`inspect_component` 永远匹配不到类型名 |
+| `toggle_behaviour` / `set_property` / `invoke_method` | 同上：靠 `GetComponents` + `GetType().Name` 定位目标组件 |
+| `find_game_object` | 受 `instanceId` 分支牵连（`path` 分支本身可用）；改用 `execute_csharp` + `UnityEngine.GameObject.Find` |
+| `inspect_material` | 靠 `GetComponent(gameObject, "Renderer")` 拿 renderer，永远报 `No renderer found` |
+| `take_screenshot` | 该 IL2CPP/CoreCLR 运行时下 `Texture2D` + `ReadPixels` 路径返回 null |
+
+实现在源码里保留了，注册处用 `#if MELONMCP_ENABLE_BROKEN_INSPECTION_TOOLS` / `#if MELONMCP_ENABLE_BROKEN_SCREENSHOT` 关掉——**修好后开宏即可，不要重写**。
+
+仍有部分工具**只有 `instanceId` 分支是死的**（`path` 分支正常）：`instantiate_object` / `set_transform` / `destroy_object`。它们依赖 `UnityHelper.FindObjectByInstanceId`，后者依赖一个在 IL2CPP 下解析为 null 的非泛型 `FindObjectsOfType` 反射查找。**用 `path` 寻址，别传 `instanceId`。**
 
 **注意事项（踩过的坑）**：
 

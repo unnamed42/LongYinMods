@@ -63,6 +63,9 @@ public class Plugin : MelonMod
     /// <summary>原生 detour：只让**敌方**阻挡，友方可穿过。</summary>
     internal static MelonPreferences_Entry<bool> NativeDetourEnabled = null!;
 
+    /// <summary>原生 detour：允许穿越**己方城墙**。</summary>
+    internal static MelonPreferences_Entry<bool> WallPassEnabled = null!;
+
 
     /// <summary>「穿越不留痕」开关：写回被穿越踩掉的原主登记。</summary>
     internal static MelonPreferences_Entry<bool> FixOccupancy = null!;
@@ -99,6 +102,12 @@ public class Plugin : MelonMod
             "原生 detour（只穿友方）",
             "在 MapNavigator.Navigate 内装 detour：友方格子可通过，敌方仍然阻挡。");
 
+        // 原生 detour：城防。独立 hook 点 —— 城墙在「存活单位」判定之前就被排除了。
+        WallPassEnabled = Category.CreateEntry(
+            "wall_pass", true,
+            "穿越己方城墙",
+            "允许穿越属于自己队伍的城墙（ObstacleType.Wall 且 teamID == selfTeamID）。" +
+            "守方 AI 自动获得同样能力；中立障碍与他方城墙不受影响。");
         // ★ 「穿越不留痕」的探测点：EnterGrid 是 6 个调用点的唯一汇聚处，
         //   且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
         FixOccupancy = Category.CreateEntry(
@@ -107,12 +116,17 @@ public class Plugin : MelonMod
             "路过友方格子后把被覆盖的原主登记写回。");
         _harmony = new HarmonyLib.Harmony(HarmonyId);
 
-        // 原生探针/原地改写探针已于 2026-10-05 删除（结论已被取代）。
-
-        // 正式的只穿友方实现：Dobby detour + 手写 stub。
+        // 两个原生 detour，各自独立开关。都在 MapNavigator.Navigate 内，但 hook 点不同：
+        //   穿友方 —— 0x180a8d929（存活单位判定）
+        //   穿己墙 —— 0x180a8d8b6（障碍格判定）—— 城墙比单位判定更早被排除
         if (NativeDetourEnabled.Value)
         {
-            NativeDetour.Install();
+            FriendlyPassHook.Instance.Install();
+        }
+
+        if (WallPassEnabled.Value)
+        {
+            WallPassHook.Instance.Install();
         }
 
         int patched = 0;
@@ -178,14 +192,16 @@ public class Plugin : MelonMod
 
         LoggerInstance.Msg(
             $"FriendlyNoclip 初始化完成：挂载 {patched} 个补丁" +
-            $"，Navigate detour={(NativeDetour.Installed ? "已启用" : "未启用")}。");
+            $"，穿友方 detour={(FriendlyPassHook.Instance.Installed ? "已启用" : "未启用")}" +
+            $"，穿己墙 detour={(WallPassHook.Instance.Installed ? "已启用" : "未启用")}。");
     }
 
 
     public override void OnDeinitializeMelon()
     {
         // 先还原原生改写，再摘 Harmony 补丁。
-        NativeDetour.Uninstall();
+        WallPassHook.Instance.Uninstall();
+        FriendlyPassHook.Instance.Uninstall();
         _harmony?.UnpatchSelf();
         _harmony = null;
         LoggerInstance.Msg("FriendlyNoclip 已卸载补丁。");
