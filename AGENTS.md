@@ -41,13 +41,35 @@ LongYinMods/
 │   └── logs/              Ghidra 等工具的日志
 ├── tools/                 自建脚本（gdb_catch.sh 等）
 ├── MelonMCP/              自建的 Unity MCP 服务端（见 §7.1）
+│   ├── MelonMCP/          工程本体（csproj / 源码 / Server / Tools）
+│   ├── lib/net6/mcs.dll   内嵌依赖（Mono.CSharp），构建必需，**要进 git**
+│   └── nuget.config       NuGet 缓存重定向
 ```
 
-> **`gamedir` 软链接是必需的**，没有它 csproj 找不到任何依赖 DLL：
-> `ln -s <游戏根目录> gamedir`
+> **`gamedir` 只建在仓库根，各工程用相对路径上溯过去。**
+>
+> ```bash
+> ln -s <游戏根目录> gamedir          # 只在仓库根建一个
+> ```
+>
+> 各 csproj 里的写法是「从自己所在目录上溯到仓库根」，**深度不同、写法不同**：
+>
+> | 工程位置 | HintPath 前缀 |
+> |---|---|
+> | `<Project>/<Project>.csproj` | `..\gamedir\...` |
+> | `<Project>/<Project>/<Project>.csproj`（多一层，如 MelonMCP） | `..\..\gamedir\...` |
+>
+> ⚠️ **不要在每个工程目录下各建一个 `gamedir` 软链接。** 那种做法看着方便，但：
+> ①它们是独立文件，换机器 / 重装时要逐个重建，忘一个就构建失败；
+> ②它们会被当成待提交内容（绝对路径的机器相关符号链接，**不能进 git**）；
+> ③路径一旦挪动就静默失效。
+> 统一从仓库根出发，只需维护**一个**链接（它在 `.gitignore` 里）。
+>
+> ⚠️ **`gamedir` 是跨工作区边界的软链接**（指向游戏安装盘），**AI 的默认沙箱策略拒绝写入**；
+> 它同时也在只读挂载上。所以凡是需要写 `gamedir/` 的操作（部署 DLL、改游戏目录下的配置文件）
+> 一律由用户执行，AI 只负责构建产物并报告路径。
 >
 > **`output/` 下全部是本地分析产物，不进 git**（`.gitignore` 已忽略 `output/`）。用 §4 的流程随时可重新生成。
-
 ---
 
 ## 3. 构建环境
