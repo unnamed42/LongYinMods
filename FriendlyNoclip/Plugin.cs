@@ -194,6 +194,7 @@ public class Plugin : MelonMod
         {
             FriendlyPassHook.Instance.Install();
         }
+
         // ★★ 城防相关的两个原生 detour，各自独立开关。
         //
         // 二分结论（已实机确认）：
@@ -791,6 +792,35 @@ public class Plugin : MelonMod
             return false;
         }
 
+        // ★★ 职责二：「可路过，不可停留」—— 不得停在已被占用的格子上。
+        //
+        // 【要解决的问题】穿友方的本意是「能踏过队友的格子」，但之前没区分
+        //   「路过」与「停靠」，于是 AI 直接停在了友方单位 / **设施**的格子上：
+        //
+        //     实机现象（2026-10，守城图）：两个 NPC 与**箭塔重叠**。
+        //     箭塔（箭塔·三）是普通 BattleUnit（不是 obstale），所以它归穿友方
+        //     这条线按队伍处理 —— 同队即被当成「队友」放行，于是被踩。
+        //
+        // 【为什么必须在 EnterGrid 而不是 Navigate】
+        //   Navigate 只回答「寻路时这格算不算通」—— 而「路过」正需要它算通。
+        //   本钩子在**落格那一刻**才拦，于是：路径仍可穿过，但落点不会是占用格。
+        //   这正是「可路过，不可停留」的实现方式。
+        //
+        // 【为什么不会让 AI 无路可走】
+        //   与城墙不同，占用格是**动态**的：AI 只需换一个空落点即可，
+        //   而空格总是大量存在（实测一局里 400 格中仅 43 格有登记）。
+        //
+        // ⚠️ 只拦「别人」：自己走进自己当前所在的格子必须放行，
+        //   否则单位会被自家登记卡住。
+        if (FixOccupancy.Value && IsBlockedByOccupant(__instance, grid))
+        {
+            Log.Msg(
+                $"[禁停占用格] 拦下进入（{SafeRow(grid)},{SafeCol(grid)}）：" +
+                $"该格已有单位 0x{ReadOccupantPtr(grid):x}（进入者 0x{__instance.Pointer.ToInt64():x}）。");
+            return false;
+        }
+
+
         try
         {
             // ★ 无条件计数：不受 Diagnostics 门控（与 OnLeave 探针同理）。
@@ -918,6 +948,67 @@ public class Plugin : MelonMod
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 目标格是否已被**别的单位**占据 —— 用于实现「可路过，不可停留」。
+    ///
+    /// <para>
+    /// 【为什么需要它】穿友方让 AI 能踏过队友格子（这是本意），但之前没有区分
+    /// 「路过」与「停靠」，于是 AI 直接**停**在了友方单位 / 设施（箭塔·三）的格子上，
+    /// 把对方的占位登记踩掉 —— 实机表现为「两个 NPC 与箭塔重叠」。
+    /// </para>
+    ///
+    /// <para>
+    /// 【判据】目标格上已有 <c>battleUnit</c>，且**不是进入者自己**。
+    /// </para>
+    /// <list type="bullet">
+    ///   <item>自己走进自己所在的格 → <b>放行</b>。否则单位会被自家登记卡死
+    ///     （例如原地转向、或引擎重设位置）。</item>
+    ///   <item>目标是空格 → 放行。</item>
+    ///   <item>目标有别人 → 拦下。这是唯一被拦的情形。</item>
+    /// </list>
+    ///
+    /// <para>
+    /// ⚠️ 任何读取异常都返回 <c>false</c>（放行）—— 本钩子在所有移动的必经之路上，
+    /// 宁可漏拦一格，也不能因为读异常弄坏移动。
+    /// </para>
+    /// </summary>
+    private static bool IsBlockedByOccupant(BattleUnit? mover, GridUnitData? grid)
+    {
+        if (mover == null || grid == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            BattleUnit? occupant = grid.battleUnit;
+
+            if (occupant == null)
+            {
+                return false;
+            }
+
+            return occupant.Pointer != mover.Pointer;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>读目标格的占用者指针；仅供日志，异常时返回 0。</summary>
+    private static long ReadOccupantPtr(GridUnitData? grid)
+    {
+        try
+        {
+            return grid?.battleUnit?.Pointer.ToInt64() ?? 0;
+        }
+        catch
+        {
+            return 0;
         }
     }
 
