@@ -227,18 +227,75 @@ c3                    ret
 
 | 工具 | 想解决的问题 | 难点 / 备注 |
 |---|---|---|
-| `hook_patch_info` 的 **`hitCount`** | 「补丁挂上了，但到底触发了几次」 | **未交付**。要么重新 patch 目标以插入计数，要么 hook Il2CppInterop 的 detour delegate。当前只能靠 mod 自己打的不受门控的日志（§5.2） |
-| `count_calls` | 不写代码就能数某函数被调用了几次 | 需要一个通用的「在入口插计数器」机制，与上面 `hitCount` 同一难点 |
+| `hook_patch_info` 的 `hitCount` | 「补丁挂上了，但到底触发了几次」 | ❌ **在 IL2CPP 下做不了，已否决** —— 理由见下方。它同时否决了 `count_calls` |
+| `count_calls` | 不写代码就能数某函数被调用了几次 | ❌ 同上，同一个难点 |
 | `heap_objects` | 枚举某类型的**活对象** | `Il2CppObjectPool` **只是缓存，不是堆**；真正的路径是 `il2cpp_gc_heap_foreach`，需要额外导出 |
+
+#### ⚠️ 为什么 `hitCount` 在 IL2CPP 下做不了（已验证，别再试）
+
+这个需求看起来合理，但**它的实现必然自指**，而自指正好破坏它要回答的问题。
+
+**事实一：Harmony 自己不记录任何调用次数。**
+`HarmonyLib.Patch` 的全部字段就这些：`priority / index / owner / before / after / debug /
+debugEmitPath / wrapTryCatch`；`PatchManager` 只暴露 `GetMethodPatcher` / `GetPatchInfo` /
+`GetPatchedMethods` 等。**没有计数器可读**，只能自己造。
+
+**事实二：能插计数器的位置都是 `internal`。**
+反编译 `Il2CppInterop.HarmonySupport.Il2CppDetourMethodPatcher` 后，原生调用链是：
+
+```
+原函数入口 ff 25 → nativeDetour → GenerateNativeToManagedTrampoline 生成的 delegate
+                                → DetourTo（CopyOriginal + HarmonyManipulator.Manipulate）
+                                → 托管方法（prefix/postfix 在这里跑）
+```
+
+计数只能加在 `DetourTo` 或那个 trampoline delegate 上 —— 而该类是 **`internal`**，
+`DetourTo` 是 `override`。要替换它就得**接管 Harmony 的整个 IL2CPP 补丁机制**。
+
+**致命问题：「再加一个计数 prefix」会污染它要观测的东西。**
+在 `DetourTo` 里 `HarmonyManipulator.Manipulate(... GetPatchInfo())` 说明：给同一方法再加
+一个 prefix，它确实会被执行。但那样测到的是**「Harmony 托管包装被进了几次」**，
+而不是「游戏调了这个函数几次」。于是发生自指：
+
+| 情况 | 计数器显示 | 能否与其它情况区分 |
+|---|---|---|
+| `IsValid=true`，原生调用进得来 | N 次 | ✅ |
+| `IsValid=false`，原生绕过补丁 | 0 次 | — |
+| **计数器自己所在的路径没跑到** | **0 次** | ❌ **与上一行无法区分** |
+
+**用一个可能失效的机制去检测失效。** 这正是 §5.2 那条纪律（「日志没打印 ≠ 代码没执行，
+先查该日志是否被门控」）的同一个坑，只是换了个形式。
+
+另外 `hook_patch_info` 目前是**只读查询**；为了计数而改成「顺手改一下目标的补丁链」，
+会把一个安全的诊断工具变成有副作用的工具 —— 得不偿失。
+
+#### ✅ 替代方案：让 mod 自己维护一个**不受门控**的计数器
+
+不需要任何新工具。本项目已经在用这个模式：`FriendlyNoclip` 里的
+`_onLeaveHits` / `_enterGridHits` —— **计数永远做（无开销、无副作用），日志受门控**。
+
+它没有自指问题，因为计数器由 mod 自己的代码直接递增，与 Harmony 是否安装成功无关 ——
+**「进了几次」和「补丁是否生效」是两个独立的事实，交叉对照才能得出结论**。
+
+而且它经 MCP 直接可读（实测）：
+
+```
+_onLeaveHits = 343
+_enterGridHits = 386
+```
+
+→ 新写补丁时**顺手加一个私有 static 计数字段**，比等一个通用工具划算得多。
+详见 §5.2「取证仪表要不受门控」。
 
 **P2 那一批当时都未开工**，记录下来供参考：`snapshot` / `diff`（拍快照后 diff，自动化
 「某操作前后变了什么」）、`log_mark`（往日志插时间轴锚点）、`break_on` / `run_until`
 （REPL 里的轻量断点）、`stack_trace_native`（MelonLoader 0.7 有 `NativeStackWalk`，
 但 Windows-only 且首次要下 PDB，Proton 下行为待验证）、`register_dump`
 （等价于 gdb 的 `info registers` + `x/4i $pc`）。
-
-> ⚠️ 其中 **`hook_patch_info` 的 `hitCount` 是最值得补的一个**：它直接对应本项目
-> 反复踩的「挂载成功 ≠ 触发」问题，而目前唯一的替代品是「mod 自己打一条不受门控
-> 的日志」—— 靠人守纪律，不靠工具保证。
+> 💡 这三个缺口里，**`heap_objects` 是唯一值得考虑的**：它有明确的技术路径
+> （数出 `il2cpp_gc_heap_foreach` 的导出）且不自指。另外两个已否决。
+>
+> 至于 `hitCount`：它当初被标为「最值得补」，是因为当时只看了「它对应哪个痛点」
+> 而没验证「它在 IL2CPP 下能否成立」。**这个判断是错的**，已在上文纠正。
 
 ---
