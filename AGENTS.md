@@ -81,12 +81,22 @@ dotnet build <Project>/<Project>.csproj -c Debug
 # 产物：<Project>/bin/Debug/net6.0/<Project>.dll
 ```
 
-### 3.2 部署：AI **可以**提权写 `Mods/`，不要把它当成用户的义务
+### 3.2 部署：**读不用提权，只有写要**
 
-`gamedir/` 是跨工作区边界的软链接，**默认沙箱拒绝写入**；但**不是做不到** ——
-用 `sandbox_permissions: danger-full-access` + `justification` 提权即可直接写入 `gamedir/Mods/`。
+先分清两件事（本项目曾无差别地每次提权，白白打断用户）：
 
-**⭐ 推荐：AI 自己提权部署，并在同一次调用里核对 md5。**
+| 操作 | 要不要提权 |
+|---|---|
+| **读** `gamedir/` 下任何文件（DLL / 日志 / cfg / dump） | ❌ **不用** —— 普通 `read`/`bash` 就行 |
+| **写** `gamedir/`（部署 DLL、改 cfg） | ✅ **需要** `danger-full-access` |
+
+实测：`ls gamedir/version.dll` 与 `ls /run/media/.../coredump/` 在默认沙箱下都能完成；
+只有 `touch gamedir/Mods/x` 会报 `只读文件系统`。
+
+→ **排查阶段（看日志、看 dump、读 DLL）一律不提权**；
+只在**最后部署**那一下提权，并在同一次调用里核对 md5。
+
+**⭐ 部署：AI 自己提权完成，不要推给用户。**
 
 ```bash
 cp <Project>/bin/Debug/net6.0/<Project>.dll gamedir/Mods/
@@ -669,6 +679,52 @@ monodis --customattr MyMod.dll | grep -i HarmonyPatch   # IL 层核实已清干�
   因为 stub 在可写内存里），每改一次调一次目标函数，比较返回值。
   **同格、同调用、只有出口不同** —— 一次就能拿到干净的因果，远快于反复改源码 + 冷启动。
   本项目因此把「三候选出口」从「靠猜」变成一张对照表。
+### 6.1b ★ 手写机器码的正确替代：用 MelonLoader 自带的 **Iced** 汇编
+
+**结论：不要手写字节。运行时就有一个完整的 x86 汇编器可用，零新依赖。**
+
+| 库 | 位置 | 能做什么 |
+|---|---|---|
+| **Iced** 1.21 | `gamedir/MelonLoader/net6/Iced.dll`（1.9MB，**已随 MelonLoader 加载**） | **汇编 + 反汇编 + 编码**，完整 x64 |
+| **Dobby** | 在 `gamedir/version.dll`（MelonLoader 原生宿主）里，由 `MelonLoader.MelonUtils.NativeHookAttach` / `NativeHook< T >` 封装 | 装 detour + **指令搬迁**（它自己负责 rel32 可达的跳板） |
+
+**Iced 的关键 API**（实测存在，`Iced.Intel`）：
+
+```csharp
+var asm = new Assembler(64);
+var lbl = asm.CreateLabel();          // 建标签
+asm.cmp(rax, 2);                      // 每个助记符一个方法
+asm.je(lbl);                          // 按标签跳，偏移由它算
+asm.Label(ref lbl);                   // 绑定标签位置
+
+// 编码：只需告诉它代码将落在哪个地址
+var writer = new CodeWriterImpl();    // 需自己实现 Iced.Intel.CodeWriter
+asm.Assemble(writer, rip, BlockEncoderOptions.None);
+// 或 TryAssemble(writer, rip, out err, out result) —— 拿得到错误信息
+```
+
+> `Assemble(CodeWriter, rip, BlockEncoderOptions)` 的 **`rip` 参数**正是
+> 「这段代码将来运行在哪个地址」。**因为我们的 stub 是运行时分配地址的**，
+> 这个参数天然合身 —— 先 `AllocateExecutable()`，拿到地址后传给 `Assemble`。
+
+**它能直接消灭本项目已经踩过的两类坑**：
+
+| 踩过的坑 | Iced 如何避免 |
+|---|---|
+| ModRM 掩码写错（手动解码 `74 78` 的 mod 字段） | 根本不手写字节，`asm.cmp(...)` 自己编码 |
+| rel8 操作数偏移 vs opcode 偏移写反 → SIGILL | 用 `Label` + `Assemble`，偏移由汇编器计算并**自动放宽到 rel32**（不够时会重写指令） |
+
+**它不能消灭的坑**（仍需人读懂反汇编）：
+
+- 选错 hook 地址（如跳到「路径中段」→ 静默失效）
+- 破坏了调用约定（如用 `rax` 中转，而目标依赖 `rax`）
+- 漏分支（`jcc` 两侧都要处理）
+
+→ **一句话：Iced 把「手算编码」这类错误降为零，但「真的看懂代码在干什么」仍然是必须的。**
+
+> ⚠️ **引用方式**：`Iced.dll` 与 MelonLoader 同级（`MelonLoader/net6/`），
+> csproj 里用 `<Private>False</Private>` 引用即可（运行时已经有），
+> **不要**拷进输出目录、也不需要 ILRepack。
 
 ### 6.2 运行时读类型描述符槽（强烈推荐，省掉手写机器码）
 
@@ -786,6 +842,8 @@ IL2CPP.il2cpp_type_get_name_(IntPtr type)
 - **游戏崩溃时 MelonLoader 来不及写日志** → 用 coredump 或**二分隔离**。
 - **二分隔离比读代码快得多**：把可疑功能各配一个开关，逐项关掉观察是否还崩。
 - **附加 gdb**：沙箱默认是 `bwrap --ro-bind / / --dev /dev --unshare-pid`，**PID 命名空间隔离**（只能看到几个 PID）—— 这是**命名空间问题不是权限问题，`sudo` 无用**。需要 `danger-full-access` 级别的提权才能看到宿主机进程。
+  > ⚠️ 注意：**读** gamedir 下的日志/dump **不需要**提权（见 §3.2）；
+  > 只有 gdb 这类需要跨 PID 命名空间的操作才要。
 - gdb 会在 .NET 常规信号（SIGUSR1/SIGUSR2）上误停 → 必须加 `handle SIGUSR1 nostop noprint pass`（及 SIGUSR2/SIG32/SIG33/SIGPIPE）。
 - ⚠️ **`GameAssembly.dll` 只映射头部一页，真正的代码在匿名 `r-xp` 区**（约 24MB）→ 按 `r-xp` + 大小筛选候选区。
 - **VA→文件偏移映射**：`file_off = VA - 0x180000000 - 0xc00`（PE 头 + 节对齐差）。直接用 `VA - 0x180000000` 会读错字节。
