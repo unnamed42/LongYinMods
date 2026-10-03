@@ -186,7 +186,7 @@ Use filters to narrow down the results.";
                 Type baseType = null;
                 if (!string.IsNullOrEmpty(baseTypeName))
                 {
-                    baseType = CSharpEvaluator.ResolveType(baseTypeName);
+                    baseType = TypeResolver.ResolveType(baseTypeName);
                 }
 
                 var types = assembly.GetTypes()
@@ -324,7 +324,7 @@ Use filters to narrow down the results.";
 
             try
             {
-                var type = CSharpEvaluator.ResolveType(typeName);
+                var type = TypeResolver.ResolveType(typeName);
                 if (type == null)
                 {
                     return ErrorResult($"Type '{typeName}' not found");

@@ -60,11 +60,11 @@ Can also find custom game types like 'Enemy', 'PlayerController', etc.";
             try
             {
                 // Resolve the type
-                var type = CSharpEvaluator.ResolveType(typeName);
+                var type = TypeResolver.ResolveType(typeName);
                 if (type == null)
                 {
                     // Try with UnityEngine prefix
-                    type = CSharpEvaluator.ResolveType("UnityEngine." + typeName);
+                    type = TypeResolver.ResolveType("UnityEngine." + typeName);
                 }
 
                 if (type == null)
@@ -173,7 +173,7 @@ This affects physics and time-based game logic.";
 
             try
             {
-                var timeType = CSharpEvaluator.ResolveType("UnityEngine.Time");
+                var timeType = TypeResolver.ResolveType("UnityEngine.Time");
                 if (timeType == null)
                 {
                     return ErrorResult("Could not find UnityEngine.Time type");
@@ -233,7 +233,7 @@ Useful for freeing the cursor to interact with debug UIs.";
 
             try
             {
-                var cursorType = CSharpEvaluator.ResolveType("UnityEngine.Cursor");
+                var cursorType = TypeResolver.ResolveType("UnityEngine.Cursor");
                 if (cursorType == null)
                 {
                     return ErrorResult("Could not find UnityEngine.Cursor type");
@@ -254,7 +254,7 @@ Useful for freeing the cursor to interact with debug UIs.";
                 if (!string.IsNullOrEmpty(lockState))
                 {
                     var lockStateProp = cursorType.GetProperty("lockState", BindingFlags.Public | BindingFlags.Static);
-                    var lockStateType = CSharpEvaluator.ResolveType("UnityEngine.CursorLockMode");
+                    var lockStateType = TypeResolver.ResolveType("UnityEngine.CursorLockMode");
 
                     if (lockStateProp != null && lockStateType != null)
                     {
@@ -333,8 +333,8 @@ Can load scenes additively or replace the current scene.";
 
             try
             {
-                var sceneManagerType = CSharpEvaluator.ResolveType("UnityEngine.SceneManagement.SceneManager");
-                var loadSceneModeType = CSharpEvaluator.ResolveType("UnityEngine.SceneManagement.LoadSceneMode");
+                var sceneManagerType = TypeResolver.ResolveType("UnityEngine.SceneManagement.SceneManager");
+                var loadSceneModeType = TypeResolver.ResolveType("UnityEngine.SceneManagement.LoadSceneMode");
 
                 if (sceneManagerType == null || loadSceneModeType == null)
                 {
@@ -440,7 +440,7 @@ The new object will be created at the same position or at a specified position."
                     return TextResult("Source GameObject not found");
                 }
 
-                var objectType = CSharpEvaluator.ResolveType("UnityEngine.Object");
+                var objectType = TypeResolver.ResolveType("UnityEngine.Object");
                 var instantiateMethod = objectType?.GetMethod("Instantiate", new[] { objectType });
 
                 if (instantiateMethod == null)
@@ -470,7 +470,7 @@ The new object will be created at the same position or at a specified position."
                         var parts = position.Split(',').Select(p => float.Parse(p.Trim())).ToArray();
                         if (parts.Length >= 3)
                         {
-                            var vector3Type = CSharpEvaluator.ResolveType("UnityEngine.Vector3");
+                            var vector3Type = TypeResolver.ResolveType("UnityEngine.Vector3");
                             var ctor = vector3Type?.GetConstructor(new[] { typeof(float), typeof(float), typeof(float) });
                             var pos = ctor?.Invoke(new object[] { parts[0], parts[1], parts[2] });
                             if (pos != null)
@@ -553,9 +553,9 @@ Returns the new object's instance ID and path.";
 
             try
             {
-                var gameObjectType = CSharpEvaluator.ResolveType("UnityEngine.GameObject");
-                var primitiveTypeEnum = CSharpEvaluator.ResolveType("UnityEngine.PrimitiveType");
-                var vector3Type = CSharpEvaluator.ResolveType("UnityEngine.Vector3");
+                var gameObjectType = TypeResolver.ResolveType("UnityEngine.GameObject");
+                var primitiveTypeEnum = TypeResolver.ResolveType("UnityEngine.PrimitiveType");
+                var vector3Type = TypeResolver.ResolveType("UnityEngine.Vector3");
 
                 if (gameObjectType == null || primitiveTypeEnum == null)
                 {
@@ -727,8 +727,8 @@ Provide values as 'x,y,z' strings. Rotation is in euler angles (degrees).";
                     return ErrorResult("Transform not found on GameObject");
                 }
 
-                var vector3Type = CSharpEvaluator.ResolveType("UnityEngine.Vector3");
-                var quaternionType = CSharpEvaluator.ResolveType("UnityEngine.Quaternion");
+                var vector3Type = TypeResolver.ResolveType("UnityEngine.Vector3");
+                var quaternionType = TypeResolver.ResolveType("UnityEngine.Quaternion");
 
                 if (vector3Type == null)
                 {
@@ -954,7 +954,7 @@ Returns material properties including shader, color, and texture information.";
             info["renderQueue"] = UnityHelper.GetProperty(material, "renderQueue");
 
             // Get common material properties
-            var colorType = CSharpEvaluator.ResolveType("UnityEngine.Color");
+            var colorType = TypeResolver.ResolveType("UnityEngine.Color");
 
             // Try to get main color
             try
@@ -1082,7 +1082,7 @@ WARNING: This cannot be undone!";
                     return TextResult("GameObject not found");
                 }
 
-                var objectType = CSharpEvaluator.ResolveType("UnityEngine.Object");
+                var objectType = TypeResolver.ResolveType("UnityEngine.Object");
                 var destroyMethod = objectType?.GetMethod("Destroy", new[] { objectType });
 
                 if (destroyMethod == null)
