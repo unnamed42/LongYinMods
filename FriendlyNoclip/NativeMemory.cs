@@ -207,6 +207,43 @@ internal static class NativeMemory
         }
     }
 
+    /// <summary>
+    /// 向原生地址写一个 int32（用于改写 IL2CPP 对象的字段）。
+    ///
+    /// <para>
+    /// 【为什么需要单独一个】<see cref="WriteBytes"/> 接受 <c>byte[]</c>，
+    /// 改写单个字段时每次都要构造数组、还要自己管字节序。
+    /// 字段写入一律走小端（Win64 原生），所以直接在这里封死。
+    /// </para>
+    /// </summary>
+    internal static bool WriteInt32(IntPtr address, int value)
+    {
+        if (address == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        return WriteBytes(address, BitConverter.GetBytes(value));
+    }
+
+    /// <summary>从原生地址读一个 int32。</summary>
+    internal static int ReadInt32(IntPtr address)
+    {
+        if (address == IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        try
+        {
+            return Marshal.ReadInt32(address);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
     /// <summary>把目标地址处若干字节改成 NOP（0x90）。</summary>
     internal static bool NopOut(IntPtr address, int count)
     {

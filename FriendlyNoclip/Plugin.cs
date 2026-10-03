@@ -198,6 +198,25 @@ public class Plugin : MelonMod
         //   与 GridUnitData.OnLeave 的 Postfix（纯托管层），
         //   不再需要任何 native detour —— 详见下方 TryPatch 调用处的注释。
 
+        // ★★ 城墙「可跨越」：直接在战斗开始时改写 GridUnitData.passes。
+        //
+        // 为什么钩 BattleMapData.Generate 而不是 PrepareBattleMap：
+        //   PrepareBattleMap 有 11 个重载，CallerCount 分散（73/189/58/…），
+        //   不是单一入口；而 Generate 的调用者【全二进制只有 1 个】
+        //   （0x180816368，位于 PrepareBattleMap 内），
+        //   且它跑在格子建好之后、任何寻路之前 —— 最干净的开局钩子。
+        if (WallPassEnabled.Value)
+        {
+            patched += TryPatch(
+                nameof(BattleMapData), "Generate",
+                nameof(BattleMapData_Generate_Postfix));
+
+            // 战斗结束恢复原值（passes 的写入者未定位，采用可回滚策略）。
+            patched += TryPatch(
+                nameof(BattleController), "BattleRealEnd",
+                nameof(BattleController_BattleRealEnd_Postfix),
+                parameterCount: 0);
+        }
         LoggerInstance.Msg(
             $"FriendlyNoclip 初始化完成：挂载 {patched} 个补丁" +
             $"，穿友方 detour={(FriendlyPassHook.Instance.Installed ? "已启用" : "未启用")}" +
@@ -990,6 +1009,128 @@ public class Plugin : MelonMod
     //   IL2CPP 下 StackTrace 只能看到 DMD 包装与 il2cpp_runtime_invoke 的帧，
     //   拿不到游戏侧调用者（实测输出恒为 `#0 .DMD<...OnLeave> #1 .(il2cpp -> managed)
     //   #2 IL2CPP.il2cpp_runtime_invoke`），对定位无帮助。
+
+    // ------------------------------------------------------------------
+    // 城墙「可跨越」：战斗开始置位 / 战斗结束恢复
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// <c>BattleMapData.Generate</c> 的 Postfix —— 战斗开局的唯一钩子。
+    ///
+    /// <para>
+    /// 用 Postfix（而非 Prefix）：<c>Generate</c> 体内会创建全部格子，
+    /// 必须在它**跑完之后**才能遍历 <c>obstacleGrids</c>。
+    /// </para>
+    ///
+    /// <para>
+    /// 为什么这个位置安全：<c>Generate</c> 的调用者全二进制只有 1 个
+    /// （<c>0x180816368</c>，在 <c>PrepareBattleMap</c> 内），
+    /// 且它一定跑在任何寻路/范围计算之前。
+    /// </para>
+    /// </summary>
+    internal static void BattleMapData_Generate_Postfix(BattleMapData __instance)
+    {
+        try
+        {
+            if (__instance == null)
+            {
+                return;
+            }
+
+            _activeMap = __instance;
+
+            // selfTeamID：用「玩家操控的队伍」与「玩家所在队伍」都试一次。
+            // 实测守城战时 GetPlayerControlTeamID 与城墙 teamID 一致；
+            // 两个都写不会误伤 —— 因为判据仍是 obstacleType==Wall，
+            // 而一份城墙只会属于一个队伍。
+            int selfTeamID = ResolveSelfTeamID();
+
+            WallPassData.Apply(__instance, selfTeamID);
+
+            // 若玩家队伍与「玩家操控队伍」不同（例如观战/AI 托管），
+            // 把另一个也放行，保证守方 AI 同样能穿越自己城墙。
+            int playerTeamID = ResolvePlayerTeamID();
+
+            if (playerTeamID != selfTeamID)
+            {
+                WallPassData.Apply(__instance, playerTeamID);
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[城墙通行] Generate Postfix 异常：{e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// <c>BattleController.BattleRealEnd</c> 的 Postfix —— 战斗结束时把
+    /// <c>passes</c> 恢复成原值。
+    /// </summary>
+    internal static void BattleController_BattleRealEnd_Postfix()
+    {
+        try
+        {
+            WallPassData.Restore();
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[城墙通行] BattleRealEnd Postfix 异常：{e.Message}");
+        }
+    }
+
+    /// <summary>取「玩家操控的队伍 ID」，失败时返回一个不会匹配任何队伍的哨兵。</summary>
+    private static int ResolveSelfTeamID()
+    {
+        try
+        {
+            var bc = GetBattleController();
+
+            if (bc != null)
+            {
+                return bc.GetPlayerControlTeamID();
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[城墙通行] 取 selfTeamID 失败：{e.Message}");
+        }
+
+        return int.MinValue;
+    }
+
+    /// <summary>取「玩家所在队伍 ID」，失败时返回哨兵。</summary>
+    private static int ResolvePlayerTeamID()
+    {
+        try
+        {
+            var bc = GetBattleController();
+            var team = bc?.GetPlayerTeam();
+
+            if (team != null)
+            {
+                return team.ID;
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[城墙通行] 取 playerTeamID 失败：{e.Message}");
+        }
+
+        return int.MinValue;
+    }
+
+    /// <summary>找当前的 <c>BattleController</c> 实例。</summary>
+    private static BattleController? GetBattleController()
+    {
+        try
+        {
+            return BattleController.Instance;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     // ------------------------------------------------------------------
     // 探针 1：GetMoveRangeGrids Postfix
