@@ -246,6 +246,20 @@ class MiniDump:
         raw = self.read_mem(addr, 8)
         return None if raw is None else struct.unpack_from("<Q", raw)[0]
 
+    def covers(self, addr):
+        """True when `addr` falls inside some captured memory region.
+
+        Used to distinguish "this dump cannot answer that question" from "the
+        answer is empty" - a distinction that costs a lot of time to rediscover.
+        """
+        index = self._build_memory_index()
+        starts = [e[0] for e in index]
+        i = bisect.bisect_right(starts, addr) - 1
+        if i < 0:
+            return False
+        lo, hi, _ = index[i]
+        return lo <= addr < hi
+
 
 # ---------------------------------------------------------------------------
 # .pdata driven unwinding
@@ -565,13 +579,32 @@ def main():
         return name.replace("\\", "/").rsplit("/", 1)[-1].lower()
 
     module_base = module_size = None
-    for mbase, msize, mname in dump.modules():
+    all_modules = list(dump.modules())
+    for mbase, msize, mname in all_modules:
         if _leaf(mname) == "gameassembly.dll":
             module_base, module_size = mbase, msize
             break
     if module_base is None:
         sys.exit("GameAssembly.dll not present in the dump's module list")
     print(f"module    : GameAssembly.dll base=0x{module_base:X} size=0x{module_size:X}")
+
+    # Attribute every frame to its owning module. "outside GameAssembly" is far
+    # too coarse: a frame in ntdll.dll is a completely different diagnosis from
+    # one in coreclr.dll, and telling them apart by hand is most of the job.
+    module_ranges = sorted((b, b + s, _leaf(n)) for b, s, n in all_modules)
+
+    def owning_module(va):
+        for lo, hi, leaf in module_ranges:
+            if lo <= va < hi:
+                return leaf, va - lo
+        return None, None
+
+    # If no frame can ever be symbolised because the code pages never made it
+    # into the dump, say so once up front - otherwise the reader chases empty
+    # symbol tables. This is a capture-scope fact, not a parser failure.
+    if not dump.covers(module_base):
+        print("note      : GameAssembly code pages are NOT in this dump -> frames")
+        print("            inside the game can only be located, not symbolised")
 
     unw = Unwinder(args.gameassembly)
     print(f"pdata     : {unw.nfunc} RUNTIME_FUNCTION entries")
@@ -613,7 +646,12 @@ def main():
             elif static_va is not None:
                 label = f"<GameAssembly+0x{fr['rva']:X}>"
             else:
-                label = "<outside GameAssembly>"
+                # Name the owning module rather than just "outside". A frame in
+                # ntdll.dll means Wine's dispatch path; one in coreclr.dll means
+                # the managed runtime. That difference is usually the diagnosis.
+                leaf, moff = owning_module(va)
+                label = (f"<{leaf}+0x{moff:X}>" if leaf
+                         else "<unmapped / not captured>")
 
             note = f"   [{fr['note']}]" if fr.get("note") else ""
             via = f"   ({fr['via']})" if fr.get("via") else ""

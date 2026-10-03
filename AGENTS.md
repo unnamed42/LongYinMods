@@ -823,6 +823,36 @@ tools/il2cpp_unwind.py /run/media/.../coredump/crash_<ts>.dmp [--all-threads]
 
 **ASLR 不是问题**：运行时基址（`0x6FFF...`）与静态 imagebase（`0x180000000`）差一个固定偏移，`base + RVA` 换算后 `.pdata` 能正确命中。怀疑偏移时，**拿一个已知 rip 反查 `.pdata`** —— 命中即说明换算正确。
 
+#### ⚠️ 先看 dump 里到底有什么，再解释它
+
+**「符号化不出来」有两种完全不同的原因，修法相反**：①帧落在无符号的 `.text`（正常）；②**代码页根本没被 dump 进去**（采集范围问题，再修解析器也没用）。
+
+实测的 `DOTNET_DbgMiniDumpType=1`（MiniDumpNormal）**只抓线程栈 + 已映射页的一小部分**，**不含任何模块映像**：
+
+| 项 | 实测值 |
+|---|---|
+| 内存区域 | 88 个，共 **164.7 KiB** |
+| 线程栈 | **81/81 全部抓到** |
+| `GameAssembly.dll` 代码页 | ❌ **完全没有** |
+
+所以脚本会先打一行 `note: GameAssembly code pages are NOT in this dump`。
+**栈本身是够的** —— 回溯靠的是栈上的返回地址，不是代码页 —— 但**指令字节、`__state`、局部变量都不在里面**，别指望从 dump 里读代码。
+
+#### ⚠️ `rip` 在 `ntdll.dll` 里 ≠ 崩在 ntdll
+
+两个 dump（`FailFast` 触发）的主线程 `rip` 都是 `ntdll.dll+0xEA94`，反汇编是：
+
+```
+c3                    ret
+eb 01                 jmp +1
+c3                    ret
+ff 14 25 0010fe7f     call qword ptr [0x7ffe1000]    <- Wine 绝对间接调用
+c3                    ret
+```
+
+这是 **Wine 的 syscall / 异常派发跳板**，不是游戏代码、也不是托管代码。`FailFast` 会走到这里，于是 **81 个线程里有 70 个的 `rip` 都是同一个值**。
+
+→ **判断「崩在哪」必须看回溯出的 `#1` 起的帧**，`#0` 只是跳板。工具现在会把模块名打出来（`<ntdll.dll+0xEA94>`、`<coreclr.dll+0x211ABA>`），**"outside GameAssembly" 这种说法太粗** —— 在 `ntdll` 和在 `coreclr` 是两种完全不同的诊断。
 #### 为什么外部手段都抓不到
 
 真实案例：`Marshal.Copy` 打在未映射地址上，**无日志、无 coredump（`coredumpctl` 计数不变）、journalctl 无 wine segv**。原因：
