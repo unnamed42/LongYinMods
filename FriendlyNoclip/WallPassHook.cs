@@ -52,20 +52,45 @@ internal sealed class WallPassHook : NativeHookBase
     /// <summary>原 <c>je</c> 的目标：跳过该邻格（保持「障碍不可通行」的原行为）。</summary>
     private const ulong VaSkip = 0x180A8DA6BUL;
 
-    /// <summary>可通行出口：直接扩展邻格（<c>[rsi+0x40]</c> 起，跳过两处占位判定）。</summary>
-    private const ulong VaExpand = 0x180A8D963UL;
-
     /// <summary>
-    /// 「非障碍格原样继续」出口：<c>0x180a8d8bc</c>，即原 <c>je</c> **不跳**时的落点。
+    /// 「放行」出口 —— <c>0x180a8d8bc</c>，即原 <c>je</c> <b>不跳</b>时的落点，
+    /// 与 <see cref="VaFallThrough"/> 是**同一个地址**。
     ///
     /// <para>
-    /// ★ 这个出口是必需的：hook 点落在 <c>je</c> 上，而 <c>je</c> 在
-    /// <c>gridType == Obstacle</c> 与 <c>!= Obstacle</c> **两种情况下都会执行**。
-    /// stub 必须自己重判 <c>gridType</c>，把非障碍格送回这条原路径，
-    /// 否则会把普通格也当成障碍排除掉。
+    /// ★★ 2026-10 修正：这里**曾经**指向 <c>0x180a8d963</c>（<c>expand</c>），那是错的。
+    /// 用 MCP 在活进程里把 stub 出口分别改成两个候选、再调 <c>MapNavigator.Navigate</c>
+    /// 走同一个「相邻己方城墙格」，得到干净的三方对照：
+    /// </para>
+    /// <list type="table">
+    ///   <item><term>出口 = <c>fallThrough</c></term><description><b>True</b>，path 长度 1 ✅</description></item>
+    ///   <item><term>出口 = <c>skip</c></term><description><b>False</b>，长度 0 ❌</description></item>
+    ///   <item><term>出口 = <c>expand</c>（旧实现）</term><description><b>False</b>，长度 0 ❌（真机表现：格子不亮）</description></item>
+    /// </list>
+    /// <para>
+    /// <b>原因</b>：<c>0x180a8d963</c> 并**不是**「接受这个格子」的入口，它是接受路径的**中段**
+    /// —— 位于 <c>0x180a8d8bc</c> 处那个占位判定（虚调用 <c>[r9+0x138]</c>，<c>r9=[rax]</c>）
+    /// **已经返回通过之后**。从那里跳进去会绕过该判定，而且它期望
+    /// <c>rsi</c>/<c>rbp</c>/<c>[rsp+0xa0]</c>/<c>[rsp+0xa8]</c> 已被前一段代码铺垫好
+    /// （首条即 <c>mov rdi,[rsi+0x40]</c> = <c>tempRef</c>），对障碍格并不成立。
+    /// </para>
+    /// <para>
+    /// 正解是走 <c>fallThrough</c>：它**重跑游戏自己的准入判定**
+    /// （<c>cmp [rax+0x14],2</c> 之后紧随的虚调用 <c>[r9+0x138]</c>），
+    /// 让城墙格由游戏原版规则去裁决，而不是由我们猜。实测该判定对**己方城墙返回通过**。
     /// </para>
     /// </summary>
-    private const ulong VaFallThrough = 0x180A8D8BCUL;
+    private const ulong VaPass = 0x180A8D8BCUL;
+
+    /// <summary>
+    /// ★ 「非障碍格」也必须送回 <see cref="VaPass"/>，这是必需的：
+    /// hook 点落在 <c>je</c> 上，而 <c>je</c> 在 <c>gridType == Obstacle</c>
+    /// 与 <c>!= Obstacle</c> **两种情况下都会执行**。
+    /// stub 必须自己重判 <c>gridType</c>，否则会把普通格也当成障碍排除。
+    /// <para>
+    /// ⚠️ 初期漏了这个分支时，表现是「移动范围只剩脚下那一格」（实机复现）。
+    /// </para>
+    /// </summary>
+
     // ---- 现场实测的字段偏移（MCP 在活进程读出 + 原生内存交叉验证）----
     private const int OffGridType = 0x14;       // GridUnitData.gridType
     private const int OffObstale = 0x30;        // GridUnitData.obstale
@@ -123,8 +148,7 @@ internal sealed class WallPassHook : NativeHookBase
     protected override byte[] BuildStub()
     {
         long skip = RuntimeVa(VaSkip);
-        long expand = RuntimeVa(VaExpand);
-        long fallThrough = RuntimeVa(VaFallThrough);
+        long pass = RuntimeVa(VaPass);
 
         var stub = new List<byte>(72);
 
@@ -142,9 +166,8 @@ internal sealed class WallPassHook : NativeHookBase
         // +0x00  cmp dword [rax+0x14], 2   ; g.gridType == Obstacle ?
         stub.AddRange(new byte[] { 0x83, 0x78, (byte)OffGridType, (byte)GridTypeObstacle });
 
-        // +0x04  jne <fallThrough>         ; 非障碍格 -> **原样继续**（不可省略！）
-        AddRel8(stub, 0x75, out int jFallThrough);
-
+        // +0x04  jne <pass>               ; 非障碍格 -> 原样继续（不可省略！）
+        AddRel8(stub, 0x75, out int jNotObstacle);
         // ---- 以下只在「障碍格」时执行 ----
 
         // +0x06  mov rcx, [rax+0x30]       ; g.obstale
@@ -166,46 +189,40 @@ internal sealed class WallPassHook : NativeHookBase
         stub.AddRange(new byte[] { 0x8B, 0x51, (byte)OffObstacleTeam });
 
         // +0x18  cmp edx, [rsp+0xd8]       ; == selfTeamID ?
-        stub.AddRange(new byte[] { 0x3B, 0x94, 0x24, 0xD8, 0x00, 0x00, 0x00 });
-
         // +0x1f  jne <skip>                ; 他方城墙 -> 保持原行为
+        stub.AddRange(new byte[] { 0x3B, 0x94, 0x24, 0xD8, 0x00, 0x00, 0x00 });
         AddRel8(stub, 0x75, out int jOtherTeam);
 
-        // ---- 三个出口 ----
+        // ---- 两个出口 ----
         //
         // ⚠️⚠️ 出口跳转**不能用 rax 做中转**（已踩坑，gdb 现场：
         //     rax=0x180a8d8bc 跳到该处后 `mov r9,[rax]` 读到代码字节当类指针，
         //     再 `[r9+0x140]` 即 SIGSEGV）。
         //
-        //   原因：`fallThrough`（0x180a8d8bc）是紧跟 `cmp` 的**原始代码**，
+        //   原因：`pass`（0x180a8d8bc）是紧跟 `cmp` 的**原始代码**，
         //   它**依赖 `cmp` 留下的 rax = 邻格 g**。
         //   而 `mov rax,imm64; jmp rax` 会把 rax 改成代码地址。
         //
-        //   对比：`skip`/`expand` 两个出口不读 rax（已逐条核实），所以以前用 rax 中转能用。
-        //   为统一与安全，**现在全部改用 r11 中转**：
-        //     r11 是 Win64 易失寄存器，且 0x180a8d8bc/skip/expand 三处后续代码均不读它
-        //     （已全量核实前 ~11 条指令）。
+        //   两个出口后续代码均不读 r11（已核实），所以统一用 r11 中转：
+        //     r11 是 Win64 易失寄存器。
         //
-        // ⚠️ expand 必须紧跟检查：三条全不跳时**顺序落入** expand。
-        int expandOff = stub.Count;
-        EmitJumpViaR11(stub, expand);
+        // ⚠️ pass 必须紧跟检查：三条全不跳时**顺序落入** pass。
+        int passOff = stub.Count;
+        EmitJumpViaR11(stub, pass);
 
         int skipOff = stub.Count;
         EmitJumpViaR11(stub, skip);
-
-        int fallThroughOff = stub.Count;
-        EmitJumpViaR11(stub, fallThrough);
         byte[] code = stub.ToArray();
 
         // 回填 rel8（相对**下一条指令**）。
         // 这里不再写死 code[5]/[14]… 而是从发射时记下的偏移直接定位，
         // 并在下方做一次自检，避免再次出现「偏移与实际布局脱节」。
-        PatchRel8(code, jFallThrough, fallThroughOff);
+        PatchRel8(code, jNotObstacle, passOff);
         PatchRel8(code, jNoObstale, skipOff);
         PatchRel8(code, jNotWall, skipOff);
         PatchRel8(code, jOtherTeam, skipOff);
 
-        VerifyStub(code, expandOff, skipOff, fallThroughOff);
+        VerifyStub(code, passOff, skipOff, jNotObstacle, jNoObstale, jNotWall, jOtherTeam);
 
         return code;
     }
@@ -233,23 +250,30 @@ internal sealed class WallPassHook : NativeHookBase
     /// 普通格全被跳过，表现为「移动范围只剩脚下那一格」，而静态看代码很难发现。
     /// 有这个自检，算错偏移会在安装时就去日志报警，而不是变成玄学现象。
     /// </para>
+    ///
+    /// <para>
+    /// 这里**不写死偏移**，而是把 <see cref="BuildStub"/> 里记下的 rel8 操作数偏移
+    /// 原样传进来。以前那版把偏移写死为 5/14/20/32，一旦指令布局变动就会
+    /// 「自检报的错”与“实际错”脱节」，反而误导排查。
+    /// </para>
     /// </summary>
-    private void VerifyStub(byte[] code, int expandOff, int skipOff, int fallThroughOff)
+    private void VerifyStub(
+        byte[] code, int passOff, int skipOff,
+        int jNotObstacle, int jNoObstale, int jNotWall, int jOtherTeam)
     {
-        // 每条 jcc rel8 的位置 → 期望出口
-        (int at, int expect, string name)[] checks =
+        var checks = new System.Collections.Generic.List<(int at, int expect, string name)>
         {
-            (5, fallThroughOff, "非障碍格 -> 原样继续"),
-            (14, skipOff, "obstale == null -> skip"),
-            (20, skipOff, "非城墙 -> skip"),
-            (32, skipOff, "他方城墙 -> skip"),
+            (jNotObstacle, passOff, "非障碍格 -> 原样继续（pass）"),
+            (jNoObstale, skipOff, "obstale == null -> skip"),
+            (jNotWall, skipOff, "非城墙 -> skip"),
+            (jOtherTeam, skipOff, "他方城墙 -> skip"),
         };
 
         foreach (var (at, expect, name) in checks)
         {
-            if (at >= code.Length)
+            if (at < 0 || at >= code.Length)
             {
-                Plugin.Log.Error($"{Tag} stub 自检失败：偏移 {at} 越界（长度 {code.Length}）。");
+                Plugin.Log.Error($"{Tag} stub 自检失败：{name} 的 rel8 偏移 {at} 越界（长度 {code.Length}）。");
                 continue;
             }
 
@@ -263,10 +287,15 @@ internal sealed class WallPassHook : NativeHookBase
             }
         }
 
-        // 三个出口都必须落在 stub 内部且互不相同。
-        if (expandOff == skipOff || skipOff == fallThroughOff)
+        // 两个出口都必须落在 stub 内部且互不相同。
+        if (passOff == skipOff)
         {
-            Plugin.Log.Error($"{Tag} stub 自检失败：出口重叠（expand={expandOff} skip={skipOff} fall={fallThroughOff}）。");
+            Plugin.Log.Error($"{Tag} stub 自检失败：出口重叠（pass={passOff} skip={skipOff}）。");
+        }
+
+        if (passOff >= code.Length || skipOff >= code.Length)
+        {
+            Plugin.Log.Error($"{Tag} stub 自检失败：出口越界（pass={passOff} skip={skipOff} 长度={code.Length}）。");
         }
     }
 }

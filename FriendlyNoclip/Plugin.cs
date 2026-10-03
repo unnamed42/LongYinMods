@@ -67,6 +67,7 @@ public class Plugin : MelonMod
     internal static MelonPreferences_Entry<bool> WallPassEnabled = null!;
 
 
+
     /// <summary>「穿越不留痕」开关：写回被穿越踩掉的原主登记。</summary>
     internal static MelonPreferences_Entry<bool> FixOccupancy = null!;
 
@@ -108,6 +109,7 @@ public class Plugin : MelonMod
             "穿越己方城墙",
             "允许穿越属于自己队伍的城墙（ObstacleType.Wall 且 teamID == selfTeamID）。" +
             "守方 AI 自动获得同样能力；中立障碍与他方城墙不受影响。");
+
         // ★ 「穿越不留痕」的探测点：EnterGrid 是 6 个调用点的唯一汇聚处，
         //   且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
         FixOccupancy = Category.CreateEntry(
@@ -661,12 +663,16 @@ public class Plugin : MelonMod
                 }
             }
 
-            Log.Msg(
-                $"[穿越] EnterGrid {(isTraversal ? "★穿越" : "普通")} " +
-                $"目标格(r{row},c{col}) mapID={SafeMapId(grid)} | " +
-                $"移动者 ptr=0x{__instance.Pointer.ToInt64():x} 队伍={ReadTeamId(__instance)} 原位置={selfPos} | " +
-                $"占用={(occupant == null ? "空" : $"ptr=0x{occupant.Pointer.ToInt64():x} 队伍={ReadTeamId(occupant)} mapGrid={occPos}")} | " +
-                $"noTurnRotation={noTurnRotation} teleport={teleport}");
+            // 高频（移动时逐格调用），受 diagnostics 门控。
+            if (Diagnostics.Value)
+            {
+                Log.Msg(
+                    $"[穿越] EnterGrid {(isTraversal ? "★穿越" : "普通")} " +
+                    $"目标格(r{row},c{col}) mapID={SafeMapId(grid)} | " +
+                    $"移动者 ptr=0x{__instance.Pointer.ToInt64():x} 队伍={ReadTeamId(__instance)} 原位置={selfPos} | " +
+                    $"占用={(occupant == null ? "空" : $"ptr=0x{occupant.Pointer.ToInt64():x} 队伍={ReadTeamId(occupant)} mapGrid={occPos}")} | " +
+                    $"noTurnRotation={noTurnRotation} teleport={teleport}");
+            }
         }
         catch (Exception e)
         {
@@ -1596,9 +1602,12 @@ public class Plugin : MelonMod
                 inRange = -1;
             }
 
-            Log.Msg(
-                $"[点击] (r{g.row},c{g.column}) state={state} {occ} " +
-                $"在范围内={(inRange == 1 ? "是" : inRange == 0 ? "否" : "读取失败")}");
+            if (Diagnostics.Value)
+            {
+                Log.Msg(
+                    $"[点击] (r{g.row},c{g.column}) state={state} {occ} " +
+                    $"在范围内={(inRange == 1 ? "是" : inRange == 0 ? "否" : "读取失败")}");
+            }
 
             // 只在"点到被判定为空的格子"时做全量登记审计 —— 这正是重叠的入口。
             if (u == null)
@@ -1668,7 +1677,10 @@ public class Plugin : MelonMod
 
             if (grid == null)
             {
-                Log.Msg($"[染色] type={v} 但 GridUnitData 为空。");
+                if (Diagnostics.Value)
+                {
+                    Log.Msg($"[染色] type={v} 但 GridUnitData 为空。");
+                }
                 return;
             }
 
@@ -1695,9 +1707,13 @@ public class Plugin : MelonMod
                 occ = alive ? $"占用(队伍={ReadTeamId(u)})" : "尸体";
             }
 
-            Log.Msg(
-                $"[染色] (r{grid.row},c{grid.column}) " +
-                $"type={v}（{(v == 6 ? "Range" : v == 4 ? "Path" : "Searched")}） {occ}");
+            // 染色日志量极大（每次刷新范围都会逐格打印），受 diagnostics 门控。
+            if (Diagnostics.Value)
+            {
+                Log.Msg(
+                    $"[染色] (r{grid.row},c{grid.column}) " +
+                    $"type={v}（{(v == 6 ? "Range" : v == 4 ? "Path" : "Searched")}） {occ}");
+            }
         }
         catch (Exception e)
         {
