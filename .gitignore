@@ -66,5 +66,4 @@ gamedir
 # 反编译产物（本地分析用，勿提交）
 output/
 
-MelonMCP/
 UnityExplorer/

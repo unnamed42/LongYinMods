@@ -746,7 +746,18 @@ IL2CPP.il2cpp_type_get_name_(IntPtr type)
 
 ## 8. 工具链
 
-**全部由用户安装。AI 不要自行尝试写 `~/.dotnet` 等沙箱外路径**（会报 `Read-only file system : '/home/huang/.dotnet/tools'`）。
+**所有工具由用户安装，AI 一律不得自行下载或安装 —— 包括装到工作区内的情况。**
+
+这条曾被执行成「只禁止写 `~/.dotnet` 等沙箱外路径」，于是有人把单个可执行脚本
+`curl` 到工作区的 `tools/bin/` 里当作「不算安装」。**那是钻字面，不是守约定。**
+判断标准是**意图**而不是落地路径：只要一个工具在当前环境里原本不存在、需要你额外
+获取才能用，就应该停下来请用户装，不要自己想办法绕。
+
+- ❌ `pip install` / `npm install` / `curl` 下载脚本 / 解压 tar 到任何位置
+- ❌ `~/.dotnet/tools`（会报 `Read-only file system`）
+- ✅ 发现缺工具 → 告诉用户「需要装 X」→ 用户装完继续
+
+> 实际上多数工具已经装好了，先 `which <tool>` 确认，不要提前假设缺失。
 
 | 工具 | 用途 |
 |---|---|
@@ -756,6 +767,7 @@ IL2CPP.il2cpp_type_get_name_(IntPtr type)
 | python + `capstone` | 反汇编核实（第 3 层） |
 | `/opt/ghidra` | C 伪代码（第 3.5 层）。**运行需 `danger-full-access` 提权**（它要重写自己的 java_home.save） |
 | `pyghidra` 3.0.2 | 已装；但脚本仍推荐写 `.java`（见 §4.5） |
+| `git-filter-repo` 2.47.0 | 历史重写（`filter-branch` 已被官方劝退）。`/usr/bin/git-filter-repo` |
 | `objdump` / `monodis` / `gdb` | 备用：反汇编 / 程序集 IL / 调试 |
 
 ---

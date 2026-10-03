@@ -1,0 +1,102 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>MelonMCP</AssemblyName>
+    <RootNamespace>MelonMCP</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <MelonDir>..\..\gamedir\MelonLoader\net6</MelonDir>
+    <UnityPath>..\..\gamedir\MelonLoader\Il2CppAssemblies</UnityPath>
+    <LibDir>..\lib</LibDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MelonLoader">
+      <HintPath>$(MelonDir)\MelonLoader.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(MelonDir)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!--
+      Iced (x86-64 decoder) ships with MelonLoader, so the disasm tools need no new dependency.
+      Private=false: MelonLoader already provides it at runtime, and copying it would make the mod
+      non-single-file.
+    -->
+    <Reference Include="Iced">
+      <HintPath>$(MelonDir)\Iced.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(MelonDir)\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.HarmonySupport">
+      <HintPath>$(MelonDir)\Il2CppInterop.HarmonySupport.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <!--
+      mcs.dll (Mono's C# compiler) is embedded into MelonMCP.dll by ILRepack so the mod stays a
+      single-file drop-in. Nothing in the MelonLoader runtime provides it, unlike Newtonsoft.Json.
+      Same approach as UnityExplorer's ML_Cpp_CoreCLR build.
+    -->
+    <Reference Include="mcs">
+      <HintPath>$(LibDir)\net6\mcs.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- ILRepack merges mcs.dll into MelonMCP.dll in a post-build step -->
+  <ItemGroup>
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.48">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <McsDllPath>$(MSBuildProjectDirectory)\..\lib\net6\mcs.dll</McsDllPath>
+  </PropertyGroup>
+
+  <!--
+    Merge mcs.dll into the mod in a post-build step.
+
+    Input is $(IntermediateOutputPath)MelonMCP.dll (the pristine compiler output), NOT $(TargetPath):
+    writing the merged file back over the build output would make the next incremental build re-merge
+    an already-merged assembly, and ILRepack then reports every mcs type as a duplicate.
+  -->
+  <Target Name="MergeMcsIntoMod" AfterTargets="Build" Condition="'$(Configuration)'=='Release'">
+    <PropertyGroup>
+      <MergedModPath>$(TargetDir)MelonMCP.dll</MergedModPath>
+      <PristineModPath>$(IntermediateOutputPath)MelonMCP.dll</PristineModPath>
+    </PropertyGroup>
+    <ItemGroup>
+      <MergeInputs Include="$(PristineModPath)" />
+      <MergeInputs Include="$(McsDllPath)" />
+    </ItemGroup>
+    <ILRepack TargetKind="SameAsPrimaryAssembly" OutputFile="$(MergedModPath)" InputAssemblies="@(MergeInputs)" LibraryPath="$(TargetDir);$(LibDir)\net6;$(MelonDir);$(UnityPath)" Internalize="false" Parallel="true" DebugInfo="false" Union="true" AllowDuplicateResources="true" AllowedDuplicateNamespaces="Mono.CompilerServices" />
+    <Message Importance="high" Text="ILRepack: merged mcs.dll into $(MergedModPath)" />
+  </Target>
+
+  <!-- Unity references will be provided by the game -->
+  <ItemGroup Condition="'$(UnityPath)' != ''">
+    <Reference Include="UnityEngine">
+      <HintPath>$(UnityPath)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(UnityPath)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
