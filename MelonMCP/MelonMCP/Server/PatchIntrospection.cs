@@ -140,32 +140,108 @@ namespace MelonMCP.Server
         }
 
         /// <summary>
-        /// Reads the first bytes of the method's native entry point as they exist at runtime.
+        /// Reads the first bytes of the method's NATIVE entry point as they exist at runtime.
         ///
-        /// This is deliberately the *runtime* bytes, not the on-disk ones: Il2CppInterop rewrites
-        /// native entries to `ff 25 &lt;disp32&gt;` (jmp qword ptr [rip+disp32]) with the slot living
-        /// outside the module image. Seeing ff 25 here is the healthy, already-hooked state.
+        /// Deliberately the runtime bytes, not the on-disk ones: Il2CppInterop rewrites native entries
+        /// to `ff 25 &lt;disp32&gt;` (jmp qword ptr [rip+disp32]) with the jump slot living outside the
+        /// module image. Seeing ff 25 here is the healthy, already-hooked state.
+        ///
+        /// IMPORTANT: this does NOT use MethodHandle.GetFunctionPointer(). For an IL2CPP proxy that
+        /// returns the MANAGED WRAPPER address, which is not inside any native function at all - it
+        /// lives in an unmapped-looking region and disassembling it yields meaningless bytes. An
+        /// earlier version of this method made exactly that mistake and reported a bogus "no jump at
+        /// entry, patch not installed" conclusion for a perfectly healthy detour.
+        ///
+        /// The correct path is the generated proxy's own NativeMethodInfoPtr_* static field, which
+        /// points at the Il2CppMethodInfo, whose first pointer-sized member is methodPointer - the
+        /// real native entry. That is precisely the address Il2CppInterop installs its detour on.
         /// </summary>
-        public static string ReadEntryBytes(MethodBase method, int count, out long entryAddress)
+        public static string ReadEntryBytes(MethodBase method, int count, out long entryAddress, out string how)
         {
             entryAddress = 0;
+            how = null;
+
+            var nativeEntry = ResolveNativeEntry(method, out how);
+            if (nativeEntry == 0) return null;
+
+            entryAddress = nativeEntry;
+
+            var bytes = new byte[count];
+            if (!NativeMemory.TryReadBytes(nativeEntry, count, out bytes)) return null;
+            return BitConverter.ToString(bytes).Replace("-", " ");
+        }
+
+        /// <summary>
+        /// Resolves the real native entry of an IL2CPP method.
+        ///
+        /// Returns 0 and sets <paramref name="how"/> to the reason when it cannot be found, so the
+        /// caller can say "unknown" instead of printing bytes from the wrong address.
+        /// </summary>
+        internal static long ResolveNativeEntry(MethodBase method, out string how)
+        {
+            how = null;
+
+            if (method == null || method.DeclaringType == null)
+            {
+                how = "no method or declaring type";
+                return 0;
+            }
+
+            // The generated Il2CppInterop proxy declares one static field per method, named
+            // NativeMethodInfoPtr_<Method>_<Access>_<Return>_<n>. The exact name is not derivable with
+            // certainty (access/return/overload suffixes vary), so match on the method name.
+            var flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+            FieldInfo field = null;
             try
             {
-                var handle = method.MethodHandle;
-                var ptr = handle.GetFunctionPointer();
-                entryAddress = ptr.ToInt64();
-
-                // A zero or absurd pointer means the handle resolved to nothing useful.
-                if (entryAddress == 0) return null;
-
-                var bytes = new byte[count];
-                System.Runtime.InteropServices.Marshal.Copy(ptr, bytes, 0, count);
-                return BitConverter.ToString(bytes).Replace("-", " ");
+                var prefix = "NativeMethodInfoPtr_" + method.Name + "_";
+                field = method.DeclaringType
+                    .GetFields(flags)
+                    .FirstOrDefault(f => f.Name.StartsWith(prefix, StringComparison.Ordinal));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return null;
+                how = $"enumerating NativeMethodInfoPtr_* fields threw {ex.GetType().Name}";
+                return 0;
             }
+
+            if (field == null)
+            {
+                how = $"no NativeMethodInfoPtr_{method.Name}_* field on {method.DeclaringType.Name}. "
+                    + "Not an IL2CPP proxy method, or the field was renamed by a different generator version.";
+                return 0;
+            }
+
+            long infoPtr;
+            try
+            {
+                var value = field.GetValue(null);
+                infoPtr = value is IntPtr ip ? ip.ToInt64() : Convert.ToInt64(value);
+            }
+            catch (Exception ex)
+            {
+                how = $"reading {field.Name} threw {ex.GetType().Name}";
+                return 0;
+            }
+
+            if (infoPtr == 0)
+            {
+                how = $"{field.Name} is null";
+                return 0;
+            }
+
+            // Il2CppMethodInfo's first pointer-sized member is methodPointer. Reading offset 0 is
+            // deliberate and is the documented layout used by Il2CppInterop itself when it installs
+            // the detour (BepInEx IL2CPPDetourMethodPatcher reads originalNativeMethodInfo.MethodPointer).
+            if (!NativeMemory.TryReadUInt64(infoPtr, out var entry) || entry == 0)
+            {
+                how = $"could not read methodPointer from Il2CppMethodInfo at 0x{infoPtr:X}";
+                return 0;
+            }
+
+            how = $"{field.Name} -> Il2CppMethodInfo 0x{infoPtr:X} -> methodPointer";
+            return (long)entry;
         }
 
         /// <summary>
@@ -284,8 +360,14 @@ namespace MelonMCP.Server
         }
 
         /// <summary>
-        /// Emits the byte-level detail that explains *why* an entry looks the way it does, so the
-        /// caller does not have to remember the ff 25 convention.
+        /// Explains what the entry bytes mean, so the caller does not have to remember the ff 25
+        /// convention.
+        ///
+        /// Deliberately careful in the no-jump case: a raw prologue means the detour is not at this
+        /// address, but on its own it does NOT prove the patch is inactive. Cross-check
+        /// patcherType / patcherIsValid and the patch counts before drawing a conclusion - an earlier
+        /// version of this text asserted "not installed" outright and produced a wrong verdict when
+        /// pointed at the wrong address.
         /// </summary>
         public static string InterpretEntryBytes(string hex)
         {
@@ -296,15 +378,17 @@ namespace MelonMCP.Server
             {
                 case "FF":
                     if (hex.StartsWith("FF 25", StringComparison.OrdinalIgnoreCase))
-                        return "ff 25 = jmp qword ptr [rip+disp32]: native entry is hooked by "
-                             + "Il2CppInterop's detour. This is the normal state for a patched IL2CPP "
+                        return "ff 25 = jmp qword ptr [rip+disp32]: the native entry is hooked by "
+                             + "Il2CppInterop's detour. This is the NORMAL state for a patched IL2CPP "
                              + "method and does NOT mean Harmony was bypassed.";
                     return "ff .. = indirect jump: entry appears redirected.";
                 case "E9":
                     return "e9 = rel32 jump: entry redirected to another function (native detour or thunk).";
                 default:
-                    return "Proceed with the raw prologue (no jump at entry): the native entry has not "
-                         + "been detoured, so any patch is either managed-only or not installed.";
+                    return "Raw prologue, no jump at entry: nothing is detoured at THIS address. "
+                         + "If patcherType is Il2CppDetourMethodPatcher with patcherIsValid true, "
+                         + "suspect that this is not the real native entry rather than that the patch "
+                         + "is missing - check nativeEntryResolvedVia.";
             }
         }
     }

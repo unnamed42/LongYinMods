@@ -244,9 +244,14 @@ Pass either typeName + methodName, or owner to list everything a given mod has p
             }
 
             string entryInterpretation = null;
+            string nativeEntryResolution = null;
+            long nativeEntryAddress = 0;
             if (includeBytes)
             {
-                state.EntryBytes = PatchIntrospection.ReadEntryBytes(method, 16, out _);
+                // how records the resolution chain (NativeMethodInfoPtr_* -> Il2CppMethodInfo ->
+                // methodPointer). Reporting it matters: if the field cannot be found we must say
+                // "unknown" rather than print bytes read from some other address.
+                state.EntryBytes = PatchIntrospection.ReadEntryBytes(method, 16, out nativeEntryAddress, out nativeEntryResolution);
                 entryInterpretation = PatchIntrospection.InterpretEntryBytes(state.EntryBytes);
             }
 
@@ -261,6 +266,8 @@ Pass either typeName + methodName, or owner to list everything a given mod has p
                 argCount = method.GetParameters().Length,
                 isStatic = method.IsStatic,
                 ilAddress = state.TargetIlAddress,
+                nativeEntryAddress = nativeEntryAddress != 0 ? $"0x{nativeEntryAddress:X}" : null,
+                nativeEntryResolvedVia = nativeEntryResolution,
                 patcherType = state.PatcherType,
                 patcherIsValid = state.PatcherIsValid,
                 patchCounts = new
