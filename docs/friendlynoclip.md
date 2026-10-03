@@ -67,7 +67,7 @@ dump_all_grids = false
 | `native_detour` | `Navigate` 内 `0x180a8d929` 的 detour，**允许穿过友方单位** | **穿不过友方** |
 | `wall_pass` | 写 `GridUnitData.passes`（§2.2c），**允许穿过己方城墙** | 穿不过己方城墙 |
 | `fix_occupancy` | `EnterGrid` Prefix + `OnLeave` Postfix，**写回被踩掉的登记** | 能穿，但**被穿的 NPC 点不动** |
-| `wall_no_stop` | `GenerateMovePath` Prefix，**城墙不可停留**（§2.2d） | **AI 会站到城墙上** |
+| `wall_no_stop` | `BattleUnit.EnterGrid` Prefix，**城墙不可停留**（§2.2d） | **AI 会站到城墙上** |
 | `wall_pass_hook` | `Navigate` 内 `0x180a8d8b6` 的 detour | 不影响（已被 `passes` 方案覆盖） |
 | `wall_highlight_hook` | 改 `GetMoveRangeGrids` 的两处判定 | **无影响，且它开着会崩** |
 
@@ -340,23 +340,85 @@ BattleController.PrepareBattleMap
 **中心格自身永远被加入范围**（§2.2c 末尾的实测表）。所以一旦某单位站上墙，
 那面墙就成为它的合法落点，且可沿墙继续走 —— **自我延续**。
 
-#### 修法：钩 `BattleController.GenerateMovePath`（Prefix）
+#### 修法：钩 `BattleUnit.EnterGrid`（Prefix）
 
-选它的理由是它是「**玩家点击**」与「**AI 自动**」两条路径的**交汇点**，
-两者都要经它生成最终路径（见 §2.4）。挂交汇点比分别修补两条路径可靠。
+**⚠️ 这里有过一次代价明确的错判，值得完整记下。**
+
+##### 第一次尝试：钩 `BattleController.GenerateMovePath` —— 失败
+
+当时的理由是「它是**玩家点击**与 **AI 自动**两条路径的交汇点」。
+**这个前提本身是错的**，实测后反汇编查明：
+
+| 路径 | 是否经过 `GenerateMovePath` |
+|---|---|
+| 玩家点击 | ✅ 经过 |
+| **AI 自动** | ❌ **不经过** |
+
+```
+GenerateMovePath 的调用者：2 处，全在 UI / 点击路径
+AI 的实际链路：PlayBattleUnitMove → MoveFromTarget → 逐格 EnterGrid
+```
+
+**实测症状**：玩家点击确实被拦住了，但 **AI 依然站到了城墙上**（用户复现）。
+钩子日志里也确有命中（`拦下落点（18,13）`）—— 说明**钩子在工作，只是 AI 不走这条路**。
+
+> 💡 **教训**：「X 是两条路径的交汇点」这种判断**必须用调用者扫描验证**，
+> 不能因为「名字听起来像入口」就当成入口。本项目当时只确认了它有 2 个调用者，
+> **没确认 AI 那条链是否经过它** —— 这就是漏掉的那一步。
+
+##### 第二次（当前）：钩 `BattleUnit.EnterGrid` —— 成功
+
+`EnterGrid` 是**单位占据格子的唯一汇聚点**，6 个调用者覆盖全部途径：
+
+| 调用者 | 用途 |
+|---|---|
+| `EnterBattleField` ×2 | 入场 |
+| `MoveNext` ×3 | **AI 与玩家点击的实际移动** |
+| `RegretMove` | 撤销移动 |
+
+且底层 `GridUnitData.OnEnter`（全部动作就是 `[格+0x18] = 单位`）
+**全二进制只有 `EnterGrid` 一个调用者**。
+
+##### 判据与行为
 
 | 条件 | 行为 |
 |---|---|
 | 目标格 `obstale == null` | 放行（普通格） |
 | 目标格是中立障碍（`obstacleType != Wall`） | 放行 —— 原版本来就不可达，不重复干预 |
-| 目标格是**城墙** | 返回 `false` → 跳过原方法，`movePath` 不更新 |
+| 目标格是**城墙** | 返回 `false` → 跳过原方法，格子不被占据 |
 
-「当作非法目标，什么都不做」是刻意选择 —— **不替游戏改写意图**
-（不做「改走到墙前」这种降级），避免引入意外副作用。
+「什么都不做」是刻意选择 —— **不替游戏改写意图**（不做「改走到墙前」这种降级）。
 
 判据与 `WallPassData.Apply` 共用 **`WallPassData.TryGetWallTeam`**（原生指针读）：
 两处必须看**同一个字段**，否则会出现「放行了但不让停」这类不一致。
-实测：**22 面城墙被拦，12 个中立障碍 + 366 个普通格不受影响**。
+实测：**22 面城墙被拦，366 个普通格 + 12 个中立障碍不受影响**。
+
+##### ⚠️ 为什么这里能安全返回 `false`
+
+| 方法 | 返回值 | 能否 prefix 返回 false |
+|---|---|---|
+| `GridUnitData.OnEnter` / `BattleUnit.EnterGrid` | **`void`** | ✅ **可以** —— 没有返回值供调用方消费 |
+| `BattleUnit.MoveFromTarget` | `IEnumerator` | ❌ **不可以** |
+
+`MoveFromTarget` 虽然也是候选钩点（全二进制只有 1 个调用者），但调用方拿到返回值后
+**直接丢给协程驱动且不做 null 检查**：
+
+```
+call MoveFromTarget
+mov  rdx, rax          ← 返回值
+call <协程驱动>         ← 无 null 检查
+```
+
+在那里返回 `false` 会把 `null` 交给协程驱动 → **极可能崩溃**，而不是优雅拒绝。
+**所以钩点选择必须同时看「覆盖范围」与「返回值语义」。**
+
+##### 活体验证（2026-10）
+
+| 调用 | 调用前 | 调用后 | 结论 |
+|---|---|---|---|
+| `EnterGrid(普通格 (18,12))` | 空 | **有** | ✅ 正常放行 |
+| `EnterGrid(空城墙 (0,13))` | 空 | **空** | ✅ 拦下 |
+| 日志 | — | `[城墙禁停] 拦下进入（18,13）` | ✅ 命中 |
 
 #### ⭐ 为什么不会造成「AI 反复选同一格」空转
 
@@ -387,7 +449,7 @@ Return type of pass through postfix … does not match type of its first paramet
 
 原因：挂载时误用了 `TryPatch`（= **postfix**）。Harmony 把
 「返回 `bool` 且首参是 `__instance`」的方法解释成了**透传 postfix**
-（postfix 的返回值会替换原返回值），而 `GenerateMovePath` 返回 `void`，类型对不上。
+（postfix 的返回值会替换原返回值），而原方法返回 `void`，类型对不上。
 
 → **同一个签名在 prefix 下合法、在 postfix 下报错。**
 报错里的 `postfix` 二字就是线索：**改挂载方式，别去改签名**。
@@ -444,10 +506,10 @@ GridUnitData.OnLeave                   -> Postfix  （★ 穿越不留痕：写�
 BattleUnit.EnterGrid                   -> Prefix   （★ 穿越不留痕：记录被覆盖的原主）
 BattleMapData.GenerateMapObjs          -> Postfix  （★ 城墙可跨越：写 passes）
 BattleController.BattleRealEnd         -> Postfix  （★ 城墙可跨越：恢复 passes）
-BattleController.GenerateMovePath      -> Prefix   （★ 城墙不可停留：拦城墙落点，§2.2d）
+BattleUnit.EnterGrid                   -> Prefix   （★ 城墙不可停留，兼「穿越不留痕」记录，§2.2d）
 ```
 
-> ⚠️ **`GenerateMovePath` 必须挂 Prefix**：写成 Postfix 会被 Harmony 当成
+> ⚠️ **返回 `bool` 的补丁必须挂 Prefix**：写成 Postfix 会被 Harmony 当成
 > 「透传 postfix」（返回 `bool` 且首参是 `__instance`），而原方法返回 `void`，
 > 于是报 `Return type of pass through postfix …`。详见 §2.2d。
 
