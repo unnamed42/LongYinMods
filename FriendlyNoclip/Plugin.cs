@@ -339,28 +339,18 @@ public class Plugin : MelonMod
         //   障碍格；**中心格自身永远进入范围**（实测：以城墙为中心算范围时，
         //   它自己会出现在结果里）。所以一旦 AI 选到它就停不下来。
         //
-        // 【为什么钩 GenerateMovePath】
-        //   它是「点击」与「AI 自动」两条路径的**交汇点** —— 两者都要经它
-        //   生成最终路径。挂在交汇点比分别修补两条路径可靠。
+        // 【为什么**不**钩 GenerateMovePath —— 一次真实的错判】
+        //   最初把城墙禁停挂在 BattleController.GenerateMovePath 上，理由是
+        //   「它是点击与 AI 的交汇点」。**这个前提是错的**：
         //
-        //   顺带：玩家点击侧本来就被高亮范围天然挡住了（非中心的城墙
-        //   不进范围），但那是个**巧合**而非保证；这道校验让它变成显式规则。
-        if (WallPassEnabled.Value && WallNoStop.Value)
-        {
-            // ⚠️ 必须用 TryPatchPrefix（一个字母之差就挂错）。
-            //
-            // 本项目真实踩过：写成 TryPatch（= postfix）后 Harmony 报
-            //   "Return type of pass through postfix … does not match type of its first parameter"
-            // 因为它把「返回 bool 且首参是 __instance」解释成了**透传 postfix**
-            // （postfix 的返回值会替换原返回值），而原方法返回 void，类型对不上。
-            //
-            // 换句话说：*同一个签名*在 prefix 下合法、在 postfix 下报错 ——
-            // 报错信息里的 "postfix" 二字就是线索，别去改签名，改挂载方式。
-            patched += TryPatchPrefix(
-                nameof(BattleController), "GenerateMovePath",
-                nameof(BattleController_GenerateMovePath_Prefix),
-                parameterCount: 1);
-        }
+        //     GenerateMovePath 的调用者只有 2 处，全在 UI / 点击路径；
+        //     AI 走的是 PlayBattleUnitMove → MoveFromTarget → 逐格 EnterGrid，
+        //     根本不经过 GenerateMovePath。
+        //
+        //   实测后果：玩家点击被拦住，但 **AI 仍然站到了城墙上**。
+        //
+        //   现在改钩 BattleUnit.EnterGrid（见上方 TryPatchPrefix），
+        //   它是单位占据格子的唯一汇聚点（6 个调用者覆盖入场/AI移动/点击/撤销）。
 
         // ★ 构建指纹：一行就能回答「现在跑的是哪个产物」。
         //
@@ -766,12 +756,41 @@ public class Plugin : MelonMod
     /// </list>
     /// </para>
     /// </summary>
-    internal static void BattleUnit_EnterGrid_Prefix(
+    internal static bool BattleUnit_EnterGrid_Prefix(
         BattleUnit __instance,
         GridUnitData grid,
         bool noTurnRotation,
         bool teleport)
     {
+        // ★★ 职责一：城墙不可停留（唯一有效的拦截点）。
+        //
+        // 【为什么必须是这里 —— 本项目真实踩坑】
+        //   上一版把「城墙禁停」钩在 BattleController.GenerateMovePath 上，
+        //   能拦住玩家点击，但 AI 仍然站到了墙上。反汇编查清原因：
+        //
+        //     GenerateMovePath 的调用者只有 2 处（均在 UI / 点击路径）
+        //     AI 走的是 PlayBattleUnitMove → MoveFromTarget → 逐格 EnterGrid
+        //     —— 根本不经过 GenerateMovePath
+        //
+        //   而 EnterGrid 有 6 个调用者，**覆盖了单位占据格子的全部途径**：
+        //     EnterBattleField ×2（入场）/ MoveNext ×3（AI 与点击的实际移动）
+        //     / RegretMove（撤销）。且 GridUnitData.OnEnter（写 [格+0x18]=单位）
+        //     全二进制**只有 EnterGrid 一个调用者**。
+        //
+        // 【为什么返回 false 是安全的】
+        //   EnterGrid 返回 void —— 没有返回值供调用方消费。
+        //   （对比：MoveFromTarget 返回 IEnumerator，调用方直接把它丢给
+        //    StartCoroutine 且不做 null 检查；在那里返回 false 会把 null
+        //    交给协程驱动 → 极可能崩。所以不能钩那里。）
+        //
+        // 拦截后「什么都不做」：不替游戏改写意图，等价于该格不可达。
+        if (WallNoStop.Value && WallPassEnabled.Value && ShouldBlockWallStep(grid))
+        {
+            Log.Msg(
+                $"[城墙禁停] 拦下进入（{SafeRow(grid)},{SafeCol(grid)}）：城墙可跨越，但不得停留。");
+            return false;
+        }
+
         try
         {
             // ★ 无条件计数：不受 Diagnostics 门控（与 OnLeave 探针同理）。
@@ -784,7 +803,7 @@ public class Plugin : MelonMod
 
             if (__instance == null || grid == null)
             {
-                return;
+                return true;   // 信息不全：放行，不阻断游戏
             }
 
             BattleUnit? occupant;
@@ -796,7 +815,7 @@ public class Plugin : MelonMod
             catch (Exception e)
             {
                 Log.Warning($"[穿越] 读 grid.battleUnit 失败：{e.Message}");
-                return;
+                return true;   // 读不了就放行 —— 宁可多一格可停，不要弄坏移动
             }
 
             int row, col;
@@ -872,7 +891,46 @@ public class Plugin : MelonMod
         catch (Exception e)
         {
             Log.Warning($"[穿越] EnterGrid 探针异常：{e.Message}");
+            // 探针出错绝不能阻断移动 —— 这里是所有移动的必经之路。
         }
+        // 默认放行：本钩子只拦「进入己方城墙」，其余交给游戏原逻辑。
+        // 这里是所有移动的必经之路 —— 任何意外的返回值都会弄坏移动。
+        return true;
+    }
+
+    /// <summary>
+    /// 目标格是不是<b>不可停留的己方城墙</b>。
+    ///
+    /// <para>
+    /// 判据与 <see cref="WallPassData.Apply"/> 共用 <see cref="WallPassData.TryGetWallTeam"/>：
+    /// 两处必须看同一个字段，否则会出现「放行了但不让停」这类不一致。
+    /// </para>
+    /// <para>
+    /// 只拦城墙，不拦中立障碍 —— 后者原版本来就不可达，不重复干预。
+    /// </para>
+    /// </summary>
+    private static bool ShouldBlockWallStep(GridUnitData? grid)
+    {
+        try
+        {
+            return WallPassData.TryGetWallTeam(grid, out _);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>读格子行号；异常时返回哨兵值（仅用于日志）。</summary>
+    private static int SafeRow(GridUnitData? grid)
+    {
+        try { return grid?.row ?? -1; } catch { return -1; }
+    }
+
+    /// <summary>读格子列号；异常时返回哨兵值（仅用于日志）。</summary>
+    private static int SafeCol(GridUnitData? grid)
+    {
+        try { return grid?.column ?? -1; } catch { return -1; }
     }
 
     /// <summary>
@@ -1246,110 +1304,6 @@ public class Plugin : MelonMod
         catch (Exception e)
         {
             Log.Warning($"[城墙通行] BattleRealEnd Postfix 异常：{e.Message}");
-        }
-    }
-
-    /// <summary>
-    /// <c>BattleController.GenerateMovePath</c> 的 Prefix —— <b>城墙可跨越，但不可停留</b>。
-    ///
-    /// <para>
-    /// 【要解决的问题】<see cref="WallPassEnabled"/> 把己方城墙的 <c>passes</c> 写成 15 后，
-    /// 城墙从「完全不可通行」变成了「<b>完全可通行</b>」：既能从上面跨过去（要的），
-    /// <b>也能停在上面</b>（不要的）。实机现象：AI 自动寻路站到了城墙上。
-    /// </para>
-    ///
-    /// <para>
-    /// 【为什么必须另加一道】<c>passes</c> 是<b>类别标志</b>，一刀切，
-    /// 它同时驱动两件事，无法只改一半：
-    /// </para>
-    /// <list type="bullet">
-    ///   <item>「能不能穿过」——<c>Navigate</c> 的搜索深度上限 = <c>row × passes</c>；</item>
-    ///   <item>「能不能停止」——<c>GetMoveRangeGrids</c> 的可达性判定。</item>
-    /// </list>
-    ///
-    /// <para>
-    /// 【为什么钩在 <c>GenerateMovePath</c>】它是「玩家点击」与「AI 自动」两条
-    /// 路径的<b>交汇点</b> —— 两者都要经它生成最终路径。挂交汇点比分别修补两条路径可靠。
-    /// （玩家侧本来就被高亮范围天然挡住了 —— 非中心的城墙格不进范围 ——
-    /// 但那是个<b>巧合</b>而非保证；这道校验让它变成显式规则。）
-    /// </para>
-    ///
-    /// <para>
-    /// 【为什么不会造成「AI 反复选同一格」空转】
-    /// 实测发现一条关键<b>不对称性</b>：<c>GetMoveRangeGrids</c> 会把
-    /// <b>中心格自身无条件加入范围</b>，而扩散进来的障碍格会被 <c>gridType != 2</c> 滤掉。
-    /// 所以：
-    /// </para>
-    /// <list type="bullet">
-    ///   <item>以<b>普通格</b>为中心算范围 → 含障碍格 <b>0 个</b> ——
-    ///     即「从普通格出发时，城墙格从来就不在候选里」；</item>
-    ///   <item>以<b>障碍格</b>为中心算范围 → 含障碍格 <b>1 个（它自己）</b>。</item>
-    /// </list>
-    /// <para>
-    /// 也就是说：拒掉城墙落点<b>并不会缩小正常候选集合</b>（正常回合里它本就不在里面），
-    /// 而是斩断了「已在墙上→再走一格墙→仍在墙上」的<b>自我延续</b>链条。
-    /// 实测一个站在墙上的单位，其范围内仍有 <b>64 个普通格</b>可选，不会无路可走。
-    /// </para>
-    ///
-    /// <para>
-    /// 【行为】返回 <c>false</c> → 跳过原方法，<c>movePath</c> 不被更新。
-    /// 即当作「非法目标」，什么都不做 —— 与游戏原本对不可达格子的处理一致。
-    /// <b>不替游戏改写意图</b>（不做「改走到墙前」这类降级），避免引入意外副作用。
-    /// </para>
-    /// </summary>
-    internal static bool BattleController_GenerateMovePath_Prefix(
-        BattleController __instance,
-        GridUnitData targetGrid)
-    {
-        try
-        {
-            if (__instance == null || targetGrid == null)
-            {
-                return true;
-            }
-
-            // 只拦「城墙」这一类。
-            //
-            // 【为什么不拦所有 Obstacle】
-            //   中立障碍（造景/木箱/ …）的原版行为本来就是「不可达」——
-            //   它们不会进候选，拦了也只是重复施加已有约束，收益极小；
-            //   而且拦得越宽，越可能碰到我们没理解的代码路径。
-            //   判据与 WallPassData.Apply 保持一致：ObstacleType.Wall。
-            var obstale = targetGrid.obstale;
-
-            if (obstale == null)
-            {
-                return true;
-            }
-
-            // ⚠️ 用**原生指针读**，不用托管代理属性。
-            //    两个原因：
-            //    ① 与 WallPassData.Apply 的判据完全一致（那边就是这么读的）——
-            //       「哪面墙被放行」与「哪面墙被禁停」必须看同一个字段；
-            //    ② 代理层的属性名带游戏自己的拼写错误（<c>obstalceType</c>），
-            //       而字段名一旦改名就会静默读到别的偏移。偏移是实测定下来的。
-            if (!WallPassData.TryGetWallTeam(targetGrid, out int wallTeam))
-            {
-                return true;   // 不是城墙（含中立造景）：不干预
-            }
-
-            // 是城墙：拒绝把它当作落点。
-            //
-            // ⚠️ 拦的是「**目标格**」而不是「单位当前格」—— 单位本身可以站在墙上
-            //    （例如已被放行时走上去的），我们要断的是「再往墙上走」这条链。
-            //
-            // 只报日志、不改行为：返回 false 即跳过原方法，movePath 不被更新。
-            Log.Msg(
-                $"[城墙禁停] 拦下落点（{targetGrid.row},{targetGrid.column}）" +
-                $"：城墙 teamID={wallTeam}。城墙可跨越，但不得停留。");
-
-            return false;
-        }
-        catch (Exception e)
-        {
-            // 出任何意外都放行 —— 宁可多一个可停留的城墙，也不要弄坏正常移动。
-            Log.Warning($"[城墙禁停] 判定异常，已放行：{e.Message}");
-            return true;
         }
     }
 
