@@ -203,7 +203,7 @@ internal static class WallPassData
             _applied = true;
             _lastMap = mapPtr;
 
-            Plugin.Log.Msg(
+            Plugin.LogInfo(() =>
                 $"[城墙通行] 已放行 {changed} 面己方城墙（teamID={selfTeamID}）：" +
                 $"passes {PassesWalkable}，可跨越但不入高亮。" +
                 $"中立障碍与他方城墙未改动。");
@@ -304,7 +304,7 @@ internal static class WallPassData
             }
         }
 
-        Plugin.Log.Msg($"[城墙通行] 已恢复 {ok}/{_modified.Count} 面城墙的 passes。");
+        Plugin.LogInfo(() =>$"[城墙通行] 已恢复 {ok}/{_modified.Count} 面城墙的 passes。");
 
         _modified.Clear();
         _applied = false;

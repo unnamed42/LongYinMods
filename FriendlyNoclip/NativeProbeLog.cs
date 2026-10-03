@@ -96,7 +96,7 @@ internal static class NativeProbeLog
             Marshal.Copy(new byte[BufferBytes], 0, _buffer, BufferBytes);
             Marshal.Copy(new byte[64], 0, _seq, 64);
 
-            Plugin.Log.Msg(
+            Plugin.LogInfo(() =>
                 $"[探针] 回溯记录器就绪：缓冲 0x{BufferVa:x}（{EntryCapacity} 条 × {EntryBytes} 字节），" +
                 $"序号槽 0x{SeqVa:x}");
             return true;
@@ -244,7 +244,7 @@ internal static class NativeProbeLog
         };
 
         _flusher.Start();
-        Plugin.Log.Msg($"[探针] 快照线程已启动，每 {intervalMs}ms 写入 {path}");
+        Plugin.LogInfo(() =>$"[探针] 快照线程已启动，每 {intervalMs}ms 写入 {path}");
     }
 
     /// <summary>停止快照线程（卸载时用）。</summary>

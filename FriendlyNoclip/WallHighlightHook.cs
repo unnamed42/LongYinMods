@@ -263,7 +263,7 @@ internal sealed class WallHighlightHook : NativeHookBase
             _gateBHook = hook;
             Installed2 = true;
 
-            Plugin.Log.Msg(
+            Plugin.LogInfo(() =>
                 $"{Tag} gate B 已挂上 0x{VaGateB + JccOffset:x}（运行时 0x{hookSite.ToInt64():x}）" +
                 $"→ stub 0x{stub.ToInt64():x}。落点现状：{NativeMemory.HexDump(hookSite, 10)}");
 

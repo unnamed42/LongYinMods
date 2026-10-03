@@ -54,7 +54,23 @@ public class Plugin : MelonMod
     /// </summary>
     private static BattleMapData? _activeMap;
 
-    /// <summary>输出诊断日志（探针阶段默认开启）。</summary>
+    /// <summary>
+    /// 诊断日志总开关，**控制全部信息性日志**。
+    ///
+    /// <para>
+    /// 【为什么全部走它】本 mod 的钩子挂在**高频路径**上（逐格移动、每帧渲染类型），
+    /// 而游戏**战斗很频繁** —— 不控制量级会让 Latest.log 迅速膨胀。
+    /// （实测一局就能产出 85 KB、其中 [穿越] 261 行、[命中] 120 行。）
+    /// </para>
+    ///
+    /// <para>
+    /// 关闭时**所有** <see cref="LogInfo"/> 静默（连字符串都不拼接）。
+    /// 但**真正的错误不受它控制** —— 见 <see cref="LogError"/>。
+    /// </para>
+    /// <para>
+    /// 它读的是 <c>.Value</c>，所以改 cfg 后**立即生效**，不需要重启。
+    /// </para>
+    /// </summary>
     internal static MelonPreferences_Entry<bool> Diagnostics = null!;
 
     /// <summary>每个移动范围计算都 dump 全部网格（日志量大）。</summary>
@@ -95,6 +111,56 @@ public class Plugin : MelonMod
 
     internal static MelonLogger.Instance Log = null!;
 
+    // ---- 日志门控（诊断开关，见 Diagnostics 条目）----
+    //
+    // 【为什么要集中门控】本 mod 的钩子挂在**高频路径**上（逐格移动、每帧渲染类型）：
+    //
+    //     GridUnitData.OnLeave / BattleUnit.EnterGrid / set_GridRenderType
+    //
+    // 一局战斗就能产生上千行，而游戏**战斗很频繁** —— 不控制量级会让
+    // Latest.log 迅速膨胀到难以阅读。
+    //
+    // 【策略：两类分开】
+    //   · Info  —— 一切**信息性**输出（命中计数、拦截记录、审计、dump）。
+    //     全部受 Diagnostics 门控。
+    //   · Error —— 真正的**错误**（异常、写失败、安装失败）。
+    //     **永不门控** —— 出问题时必须看得见，否则排查时会被误导。
+    //
+    // 把「判门控」这件事收在这里，而不是让每个调用点各自 if ——
+    // 免得新增日志时漏掉（这正是本次要修的问题）。
+
+    /// <summary>
+    /// 写一条**信息性**日志，受 <see cref="Diagnostics"/> 门控。
+    /// 未开诊断时**完全静默**（不拼接字符串、不分配）。
+    /// </summary>
+    /// <param name="message">惰性求值：未开诊断时不会执行。</param>
+    internal static void LogInfo(Func<string> message)
+    {
+        if (!Diagnostics.Value)
+        {
+            return;
+        }
+
+        try
+        {
+            Log.Msg(message());
+        }
+        catch
+        {
+            // 日志本身出错绝不能影响游戏逻辑。
+        }
+    }
+
+    /// <summary>
+    /// 写一条**错误**日志，**永不受门控**。
+    ///
+    /// <para>
+    /// 只用于「出错了、用户需要知道」的场景。
+    /// 正常但值得记录的流程（如「拦下一面墙」）属于信息，请用 <see cref="LogInfo"/>。
+    /// </para>
+    /// </summary>
+    internal static void LogError(string message) => Log.Warning(message);
+
     /// <summary>OnLeave Prefix 命中次数（不受诊断开关门控）。</summary>
     private static int _onLeaveHits;
 
@@ -110,7 +176,9 @@ public class Plugin : MelonMod
 
         Diagnostics = Category.CreateEntry(
             "diagnostics", false,
-            "诊断日志", "打印移动范围与网格的详细内容（日志量大，排查时才开）。");
+            "诊断日志",
+            "总开关：控制全部信息性日志（命中计数、拦截记录、审计、dump）。" +
+            "游戏战斗频繁，不控制量级会让日志迅速膨胀。关闭时只保留真正的错误。");
 
         DumpAllGrids = Category.CreateEntry(
             "dump_all_grids", false,
@@ -661,15 +729,19 @@ public class Plugin : MelonMod
     {
         try
         {
-            // ★ 无条件计数：不受 Diagnostics 门控。
-            // 目的：把「补丁零触发」与「诊断开关没开」彻底分开 ——
-            // 之前用零条 [登记] 行推断补丁没触发，但那些行本身是被门控的，
-            // 所以那个推断不成立。这个计数器不带任何门控。
+            // 计数**与日志分开**：计数永远做（无开销、无副作用），
+            // 日志受 Diagnostics 门控。
+            //
+            // 历史上这里的前 20 次是**不受门控**的 —— 目的是把「补丁零触发」
+            // 与「诊断开关没开」分开。现在改为全部门控（用户要求：战斗频繁、
+            // 不能让日志膨胀）；代价是开诊断前看不到这些命中行 ——
+            // 但 §「排查顺序」已要求先确认 md5 与冷启动，那条路更可靠。
             int n = Interlocked.Increment(ref _onLeaveHits);
+            _ = n;
 
-            if (n <= 20)
+            if (Diagnostics.Value && n <= 20)
             {
-                Log.Msg($"[命中] OnLeave 第 {n} 次被调用");
+                LogInfo(() => $"[命中] OnLeave 第 {n} 次被调用");
             }
 
             if (__instance == null)
@@ -787,7 +859,7 @@ public class Plugin : MelonMod
         // 拦截后「什么都不做」：不替游戏改写意图，等价于该格不可达。
         if (WallNoStop.Value && WallPassEnabled.Value && ShouldBlockWallStep(grid))
         {
-            Log.Msg(
+            LogInfo(() =>
                 $"[城墙禁停] 拦下进入（{SafeRow(grid)},{SafeCol(grid)}）：城墙可跨越，但不得停留。");
             return false;
         }
@@ -814,7 +886,7 @@ public class Plugin : MelonMod
         //   否则单位会被自家登记卡住。
         if (FixOccupancy.Value && IsBlockedByOccupant(__instance, grid))
         {
-            Log.Msg(
+            LogInfo(() =>
                 $"[禁停占用格] 拦下进入（{SafeRow(grid)},{SafeCol(grid)}）：" +
                 $"该格已有单位 0x{ReadOccupantPtr(grid):x}（进入者 0x{__instance.Pointer.ToInt64():x}）。");
             return false;
@@ -823,12 +895,13 @@ public class Plugin : MelonMod
 
         try
         {
-            // ★ 无条件计数：不受 Diagnostics 门控（与 OnLeave 探针同理）。
+            // 计数永远做，日志受门控（同 OnLeave）。
             int n = Interlocked.Increment(ref _enterGridHits);
+            _ = n;
 
-            if (n <= 40)
+            if (Diagnostics.Value && n <= 40)
             {
-                Log.Msg($"[命中·EnterGrid] 第 {n} 次被调用");
+                LogInfo(() => $"[命中·EnterGrid] 第 {n} 次被调用");
             }
 
             if (__instance == null || grid == null)
@@ -907,16 +980,13 @@ public class Plugin : MelonMod
                 }
             }
 
-            // 高频（移动时逐格调用），受 diagnostics 门控。
-            if (Diagnostics.Value)
-            {
-                Log.Msg(
+            // 高频（移动时逐格调用）—— LogInfo 自带门控，无需再套 if。
+            LogInfo(() =>
                     $"[穿越] EnterGrid {(isTraversal ? "★穿越" : "普通")} " +
                     $"目标格(r{row},c{col}) mapID={SafeMapId(grid)} | " +
                     $"移动者 ptr=0x{__instance.Pointer.ToInt64():x} 队伍={ReadTeamId(__instance)} 原位置={selfPos} | " +
                     $"占用={(occupant == null ? "空" : $"ptr=0x{occupant.Pointer.ToInt64():x} 队伍={ReadTeamId(occupant)} mapGrid={occPos}")} | " +
                     $"noTurnRotation={noTurnRotation} teleport={teleport}");
-            }
         }
         catch (Exception e)
         {
@@ -1055,7 +1125,7 @@ public class Plugin : MelonMod
                 };
             }
 
-            Log.Msg(
+            LogInfo(() =>
                 $"[修复·登记] 记录待恢复：格(r{row},c{col}) " +
                 $"原主 ptr=0x{occupant.Pointer.ToInt64():x}（被穿越者 0x{mover.Pointer.ToInt64():x} 覆盖）");
         }
@@ -1113,7 +1183,7 @@ public class Plugin : MelonMod
             if (current != null && current.Pointer != pending.Mover)
             {
                 // 本格已被别的单位占用，现场与记录不符，不插手。
-                Log.Msg(
+                LogInfo(() =>
                     $"[修复·登记] 跳过 (r{pending.Row},c{pending.Col})：" +
                     $"本格当前被 ptr=0x{current.Pointer.ToInt64():x} 占用。");
                 return;
@@ -1142,7 +1212,7 @@ public class Plugin : MelonMod
 
                 if (omg == null || omg.Pointer != pending.Grid)
                 {
-                    Log.Msg(
+                    LogInfo(() =>
                         $"[修复·登记] 跳过 (r{pending.Row},c{pending.Col})：" +
                         $"原主 0x{original.Pointer.ToInt64():x} 的 mapGrid=" +
                         (omg == null
@@ -1162,7 +1232,7 @@ public class Plugin : MelonMod
             // battleUnit 的 setter 带 GC write barrier，托管层写入是安全的。
             grid.battleUnit = original;
 
-            Log.Msg(
+            LogInfo(() =>
                 $"[修复·登记] ★已写回 (r{pending.Row},c{pending.Col}) " +
                 $"原主 ptr=0x{original.Pointer.ToInt64():x} 队伍={ReadTeamId(original)} " +
                 $"（此前被穿越者 0x{pending.Mover.ToInt64():x} 覆盖）");
@@ -1287,7 +1357,7 @@ public class Plugin : MelonMod
             }
         }
 
-        Log.Msg(
+        LogInfo(() =>
             $"[登记] {op} 格(r{row},c{col}) mapID={SafeMapId(grid)} | " +
             $"改前={before} | 写入={(unit == null ? "null" : $"队伍={ReadTeamId(unit)},ptr=0x{unit.Pointer.ToInt64():x}")} | " +
             $"{self}");
@@ -1518,7 +1588,7 @@ public class Plugin : MelonMod
     {
         try
         {
-            Log.Msg(
+            LogInfo(() =>
                 $"[审计] 被点格=(r{clicked.row},c{clicked.column}) " +
                 $"battleUnit={(clicked.battleUnit == null ? "null" : "非null")} " +
                 $"gridType={clicked.gridType}");
@@ -1548,7 +1618,7 @@ public class Plugin : MelonMod
 
         if (map == null)
         {
-            Log.Msg("[审计·格] _activeMap 为空，跳过。");
+            LogInfo(() =>"[审计·格] _activeMap 为空，跳过。");
             return;
         }
 
@@ -1560,13 +1630,13 @@ public class Plugin : MelonMod
         }
         catch (Exception e)
         {
-            Log.Msg($"[审计·格] 读 normalGrids 失败：{e.Message}");
+            LogInfo(() =>$"[审计·格] 读 normalGrids 失败：{e.Message}");
             return;
         }
 
         if (grids == null)
         {
-            Log.Msg("[审计·格] normalGrids 为空。");
+            LogInfo(() =>"[审计·格] normalGrids 为空。");
             return;
         }
 
@@ -1634,7 +1704,7 @@ public class Plugin : MelonMod
             }
         }
 
-        Log.Msg(
+        LogInfo(() =>
             $"[审计·格] normalGrids={total} 有单位登记={occupied} 自相矛盾={broken}{sb}");
     }
 
@@ -1713,12 +1783,12 @@ public class Plugin : MelonMod
                 ? "-"
                 : (viaList.battleUnit == null ? "空" : $"占(队伍={ReadTeamId(viaList.battleUnit)})");
 
-            Log.Msg(
+            LogInfo(() =>
                 $"[审计·对照] (r{row},c{col}) mapGrids→{pa} {occA} | " +
                 $"normalGrids→{pb} {occB} | 同一对象={(same ? "是" : "否")}");
 
             // 被点格自身也算一路：它来自 GridUnitController.gridData（视觉对象）。
-            Log.Msg(
+            LogInfo(() =>
                 $"[审计·对照] 被点格自身 0x{clicked.Pointer.ToInt64():x} " +
                 $"battleUnit={(clicked.battleUnit == null ? "null" : "非null")} | " +
                 $"与mapGrids同对象={(viaRowCol != null && viaRowCol.Pointer == clicked.Pointer ? "是" : "否")} | " +
@@ -1747,7 +1817,7 @@ public class Plugin : MelonMod
 
             if (all == null)
             {
-                Log.Msg("[普查] normalGrids 为空，跳过。");
+                LogInfo(() =>"[普查] normalGrids 为空，跳过。");
                 return;
             }
 
@@ -1886,7 +1956,7 @@ public class Plugin : MelonMod
                 }
             }
 
-            Log.Msg(
+            LogInfo(() =>
                 $"[普查] mapGrids {w}x{h} 有效={mapCells} 占据={mapOccupied} | " +
                 $"normalGrids={listCount} 占据={listOccupied} | " +
                 $"同对象={sameObj} 异对象={diffObj} 表里没有={missingInList} " +
@@ -1924,7 +1994,7 @@ public class Plugin : MelonMod
     {
         if (units == null)
         {
-            Log.Msg($"[审计·单位] {label}=null");
+            LogInfo(() =>$"[审计·单位] {label}=null");
             return;
         }
 
@@ -2009,7 +2079,7 @@ public class Plugin : MelonMod
             }
         }
 
-        Log.Msg($"[审计·单位] {label} 总数={total} 存活={alive} 不一致={broken}{sb}");
+        LogInfo(() =>$"[审计·单位] {label} 总数={total} 存活={alive} 不一致={broken}{sb}");
     }
 
     /// <summary>
@@ -2071,7 +2141,7 @@ public class Plugin : MelonMod
 
             if (Diagnostics.Value)
             {
-                Log.Msg(
+                LogInfo(() =>
                     $"[点击] (r{g.row},c{g.column}) state={state} {occ} " +
                     $"在范围内={(inRange == 1 ? "是" : inRange == 0 ? "否" : "读取失败")}");
             }
@@ -2146,7 +2216,7 @@ public class Plugin : MelonMod
             {
                 if (Diagnostics.Value)
                 {
-                    Log.Msg($"[染色] type={v} 但 GridUnitData 为空。");
+                    LogInfo(() =>$"[染色] type={v} 但 GridUnitData 为空。");
                 }
                 return;
             }
@@ -2177,7 +2247,7 @@ public class Plugin : MelonMod
             // 染色日志量极大（每次刷新范围都会逐格打印），受 diagnostics 门控。
             if (Diagnostics.Value)
             {
-                Log.Msg(
+                LogInfo(() =>
                     $"[染色] (r{grid.row},c{grid.column}) " +
                     $"type={v}（{(v == 6 ? "Range" : v == 4 ? "Path" : "Searched")}） {occ}");
             }
@@ -2296,7 +2366,7 @@ public class Plugin : MelonMod
             sbTypes.Append(' ').Append(kv.Key).Append('=').Append(kv.Value);
         }
 
-        Log.Msg(
+        LogInfo(() =>
             $"[探针] GetMoveRangeGrids from(r{row},c{column}) min={minRange} max={maxRange} " +
             $"selfTeamID={selfTeamID} → Count={total} " +
             $"单位={occupied}(我{allyOccupied}/敌{enemyOccupied}) " +

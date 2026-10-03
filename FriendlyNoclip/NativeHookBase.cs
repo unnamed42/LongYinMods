@@ -249,7 +249,7 @@ internal abstract class NativeHookBase
             // 回读确认 hook 生效：Dobby 会在 site 处写入一条跳转。
             string siteNow = NativeMemory.HexDump(site, 8);
 
-            Plugin.Log.Msg(
+            Plugin.LogInfo(() =>
                 $"{Tag} 已挂上 0x{HookVa:x}（运行时 0x{site.ToInt64():x}）→ stub 0x{_stub.ToInt64():x}，" +
                 $"跳板 0x{_hook.TrampolineHandle.ToInt64():x}。落点现状：{siteNow}");
 
@@ -278,7 +278,7 @@ internal abstract class NativeHookBase
                 // 并自行清空 _trampoline / _trampolineHandle（字段直赋，不走会抛异常的 setter）。
                 _hook.Detach();
 
-                Plugin.Log.Msg(
+                Plugin.LogInfo(() =>
                     $"{Tag} 已摘除（IsHooked={_hook.IsHooked}，落点 0x{_hook.Target.ToInt64():x}）。");
                 _detached = true;
             }
@@ -411,7 +411,7 @@ internal abstract class NativeHookBase
     /// </summary>
     protected void LogStubDisassembly(byte[] code)
     {
-        Plugin.Log.Msg($"{Tag} stub（{code.Length} 字节）@0x{_stub.ToInt64():x}：\n" +
+        Plugin.LogInfo(() =>$"{Tag} stub（{code.Length} 字节）@0x{_stub.ToInt64():x}：\n" +
                        StubAssembler.Describe(code, _stub.ToInt64()));
     }
 
