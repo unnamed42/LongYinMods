@@ -66,19 +66,12 @@ public class Plugin : MelonMod
     /// <summary>原生 detour：允许穿越**己方城墙**。</summary>
     internal static MelonPreferences_Entry<bool> WallPassEnabled = null!;
 
-    /// <summary>
-    /// 【已废弃】旧的合并开关（同时管两个原生 detour）。
-    /// 保留仅为兼容旧配置；实际已拆成下面两个。
-    /// </summary>
-    internal static MelonPreferences_Entry<bool> WallNativeHooksEnabled = null!;
-
     /// <summary><see cref="WallPassHook"/>（改 <c>Navigate</c> 里的障碍判定）。</summary>
     internal static MelonPreferences_Entry<bool> WallPassHookEnabled = null!;
 
     /// <summary>
     /// <see cref="WallHighlightHook"/>（改 <c>GetMoveRangeGrids</c> 里的两处障碍判定）。
-    /// 二分第一轮已确认崩溃出自「原生 detour」；这个是主嫌疑（dump 显示
-    /// 崩溃紧跟 <c>call GetMoveRangeGrids</c> 之后）。
+    /// <b>默认 false</b>：已实测会崩溃且非功能所需，详见它注册处的注释。
     /// </summary>
     internal static MelonPreferences_Entry<bool> WallHighlightHookEnabled = null!;
 
@@ -126,22 +119,49 @@ public class Plugin : MelonMod
             "允许穿越属于自己队伍的城墙（ObstacleType.Wall 且 teamID == selfTeamID）。" +
             "守方 AI 自动获得同样能力；中立障碍与他方城墙不受影响。");
 
-        // ★ 二分开关：开 wall_pass 实际会装 4 样东西：
-        //   ① GenerateMapObjs 的 Postfix（写 passes）  —— 纯数据
-        //   ② BattleRealEnd  的 Postfix（恢复 passes） —— 纯数据
-        // 二分第一轮结果：合并开关=false 后不崩（passes 仍在）
-        // => 崩溃出在两个原生 detour 之一。所以进一步拆开。
+        // ★ 二分结论（2026-10-04，已实机确认）：
+        //
+        //   ① GenerateMapObjs Postfix（写 passes）   —— 纯数据，安全
+        //   ② BattleRealEnd   Postfix（恢复 passes） —— 纯数据，安全
+        //   ③ WallPassHook（改 Navigate）            —— 需要，安全
+        //   ④ WallHighlightHook（改 GetMoveRangeGrids）—— ★ 会崩溃，默认关
+        //
+        // 验证过程：
+        //   两轮二分：合并开关=false -> 不崩；
+        //   再 wall_pass_hook=true + wall_highlight_hook=false -> 不崩，
+        //   且**城墙穿越已经可用**。
+        //
+        // => 高亮 hook 既会崩溃、又**不是功能所必需的**（passes 已经让
+        //    Navigate 能穿墙，而墙对面格子本来就由游戏自己的
+        //    GetMoveRangeGrids 调 Navigate 决定亮不亮）。
 
         WallPassHookEnabled = Category.CreateEntry(
             "wall_pass_hook", true,
             "城防 detour（WallPassHook）",
             "改 Navigate 里的障碍格判定。关闭后不影响其它功能。");
 
-        WallHighlightHookEnabled = Category.CreateEntry(
-            "wall_highlight_hook", true,
-            "高亮 detour（WallHighlightHook）",
-            "改 GetMoveRangeGrids 里的两处障碍格判定（让墙对面亮起来）。" +
-            "二分主嫌疑：dump 显示崩溃紧跟 call GetMoveRangeGrids 之后。");
+    /// <summary>
+    /// <see cref="WallHighlightHook"/>（改 <c>GetMoveRangeGrids</c> 里的两处障碍判定）。
+    ///
+    /// <para><b>默认 false</b>，两个原因：</para>
+    /// <list type="number">
+    ///   <item><b>它会崩溃</b>：实机二分确认，开着它打完一场必崩（FailFast）；
+    ///     而且 dump 显示崩溃帧紧跟 <c>call GetMoveRangeGrids</c> 之后 ——
+    ///     与它装的两个 detour 完全对应。</item>
+    ///   <item><b>它并不需要</b>：关掉之后**城墙穿越仍然正常可用**。
+    ///     因为 <c>passes</c> 已让 <c>Navigate</c> 能穿墙，而墙对面格子亮不亮
+    ///     本来就由游戏自己的 <c>GetMoveRangeGrids</c> 调 <c>Navigate</c> 决定。</item>
+    /// </list>
+    /// <para>
+    /// 保留代码与开关：若将来想让城墙格本身也亮（当前语义是「不可停留」），
+    /// 可以再研究一个不崩溃的做法。
+    /// </para>
+    /// </summary>
+    WallHighlightHookEnabled = Category.CreateEntry(
+        "wall_highlight_hook", false,
+        "高亮 detour（WallHighlightHook）【实验性，会崩溃】",
+        "改 GetMoveRangeGrids 里的两处障碍格判定。" +
+        "已验证会崩溃且非功能所需，默认关闭。");
         // ★ 「穿越不留痕」的探测点：EnterGrid 是 6 个调用点的唯一汇聚处，
         //   且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
         FixOccupancy = Category.CreateEntry(
@@ -157,16 +177,13 @@ public class Plugin : MelonMod
         {
             FriendlyPassHook.Instance.Install();
         }
-        // ★★ 两个原生 detour **分开开关**（而不是共享 wall_native_hooks）。
+        // ★★ 城防相关的两个原生 detour，各自独立开关。
         //
-        // 二分第一轮结果：wall_native_hooks=false 后**不再崩溃**，
-        // 而 passes 数据写入仍在（已放行 22 面）——
-        // => 崩溃由这两个之一引起，数据写入与既有问题全部排除。
-        //
-        // 再分一轮就能定位到具体哪个：
-        //   wall_highlight_hook=false 而 wall_pass_hook=true
-        //     -> 不崩 ⇒ 是高亮 hook（与 dump 的旁证一致）
-        //     -> 还崩 ⇒ 是 WallPassHook
+        // 二分结论（已实机确认）：
+        //   wall_highlight_hook=false 时**不崩**，且城墙穿越正常；
+        //   开着它则打完一场必崩（FailFast，dump 帧紧跟
+        //   `call GetMoveRangeGrids` 之后）。
+        // => 高亮 hook 默认关（见它注册处的注释）。
         bool passHookOn = WallPassEnabled.Value && WallPassHookEnabled.Value;
         bool highlightHookOn = WallPassEnabled.Value && WallHighlightHookEnabled.Value;
 
