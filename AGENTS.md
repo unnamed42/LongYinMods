@@ -261,17 +261,40 @@ def typedef(name):
 - Ghidra **12.1.2** @ `/opt/ghidra`，启动器 `/usr/bin/ghidra`
 - **工程**：`output/ghidra_proj/LongYin`（headless 用）
 
-> ⚠️ **必须用 `.java` 版脚本，不能用 `.py`**。Ghidra 12.1.2 默认把 `.py` 路由给 **PyGhidra**，
-> 而本机**未安装 PyGhidra**，会报：
-> ```
-> ERROR REPORT SCRIPT ERROR: DecompMany.py : Ghidra was not started with PyGhidra.
-> Python is not available
-> ```
-> 本项目已将脚本改写为 **`output/dumper_out/DecompMany.java`**（GhidraScript 的 Java API
-> 与 Jython 几乎一一对应）。**以后再写 Ghidra 脚本，直接写 `.java`。**
+> ⚠️ **脚本用 `.java`，不要用 `.py`**（即使装了 PyGhidra）。Ghidra 12.1.2 把 `.py` 路由给
+> PyGhidra；本机**已装 PyGhidra 3.0.2**，但 Jython 时代的脚本（`ghidra_with_struct.py`）
+> 仍有 Python2/3 语法与 API 差异，且 `askFile()` 在 headless 下会卡住。
+> **写 Ghidra 脚本一律用 `.java`**（GhidraScript 原生 API，最稳）。
 >
-> 另注：Ghidra 启动时会写 `~/.config/ghidra/`（`java_home.save`、`application.log`），
-> **沙箱只读时需要提权**，否则报 `FileNotFoundException: ... java_home.save (只读文件系统)`。
+> ⚠️ **Ghidra 启动时会无条件重写** `~/.config/ghidra/<ver>/java_home.save`。
+> 沙箱只读时必然报 `FileNotFoundException: ... java_home.save (只读文件系统)`，
+> 而且**预先创建该文件也没用**（它照样要重写）。
+> → **运行 `analyzeHeadless` 必须用 `danger-full-access` 提权**，否则连 `--help` 都出不来。
+> 提权后会自动使用 `/usr/lib/jvm/java-21-openjdk`（Ghidra 12.1.2 要求 Java 21）。
+
+**⭐ 导入符号名（强烈推荐，先做这一步）**：
+
+`tools/il2cppdumper/ImportSymbols.java` 把 Il2CppDumper 的 `script.json` 里的
+「类名.方法名」写回 Ghidra 工程，**一次性 62278 条全部成功**。做完之后反编译输出里
+`FUN_180a8d5a0` 会变成 `MapNavigator_Navigate`、`FUN_180873a10` 会变成
+`GridUnitData_Distance`、`0x18181e6b0` 会变成 `System_Collections_ArrayList_Add` ——
+**可读性天差地别**。
+
+```bash
+# 只需跑一次；结果保存在工程里（Save succeeded）
+/opt/ghidra/support/analyzeHeadless \
+    $PWD/output/ghidra_proj LongYin \
+    -process GameAssembly.dll -noanalysis \
+    -scriptPath $PWD/tools/il2cppdumper \
+    -postScript ImportSymbols.java \
+        $PWD/output/dumper_out/script.json
+```
+
+> ⚠️ **符号名会让你误判类型**！`script.json` 的 `Address` 是 **RVA**（不是 VA），
+> 且符号名来自 metadata，**不反映调用点的实际参数类型**。
+> 实例：`0x1808CA250` 的符号名是 `BattleMapData.get_GridCount`（读 `[rcx+0x20]*[rcx+0x24]`），
+> 而 `Navigate` 调用它时 `rcx` 是 **`from`（一个 `GridUnitData`）**，于是实际算的
+> 是 `passes * row`。**看到符号名后，还要结合调用点的寄存器内容判断。**
 
 **批量反编译脚本 `output/dumper_out/DecompMany.java`**（本项目自建，**必须用 `-postScript` + 脚本参数**）：
 
@@ -323,9 +346,13 @@ for k in range(1, len(args), 2):
 - 输出文件名由**你**给，**与 Ghidra 内符号名无关** → 文件名里的方法名是**人工标注**，可能与托管名不符。
 - ⚠️ **脚本日志要去 Ghidra 的 log 里看，不是终端**：`~/.config/ghidra/<ver>/application.log`（含 `Execute script:` / `NO FUNCTION` / `Save succeeded`）。
 
-**关于 `FUN_xxxxxxxx` 函数名**：Il2CppDumper 的 `ghidra_with_struct.py` 在本环境**从未成功运行**（`Ghidra was not started with PyGhidra. Python is not available` + 第 156 行语法问题 + `askFile()` 是 GUI 弹窗、headless 下取不到参数会卡住）。
-
-**应对：靠地址认函数，别指望符号名。** 流程本来就是「先用 capstone/metadata 定地址，再拿地址去 Ghidra 要伪代码，读出来自己命名」。
+> ✅ **符号名已可用（2026-10）**：早期的结论「`ghidra_with_struct.py` 在本环境从未成功运行」
+> 已**过时**。现在用自建的 `tools/il2cppdumper/ImportSymbols.java` 一次性导入 62278 条符号，
+> 反编译输出直接显示 `MapNavigator_Navigate` / `GridUnitData_Distance` 这样的真名，
+> **不再需要「靠地址认函数」**。详见 §4.5 的 ImportSymbols 小节。
+>
+> 仍保留的手段：拿地址去 Ghidra 要伪代码，用 `getFunctionContaining(addr)` 定位
+> —— 即使有符号名，**按地址点名仍是最可靠的定位方式**（符号名可能对不上）。
 
 ### 4.6 不可用的路径（已试过，别重试）
 
@@ -583,7 +610,8 @@ IL2CPP.il2cpp_type_get_name_(IntPtr type)
 | `/usr/bin/ilspycmd` | 托管反编译（第 1 层） |
 | `~/.local/bin/cpp2il` | 调用图恢复（第 2 层） |
 | python + `capstone` | 反汇编核实（第 3 层） |
-| `/opt/ghidra` | C 伪代码（第 3.5 层） |
+| `/opt/ghidra` | C 伪代码（第 3.5 层）。**运行需 `danger-full-access` 提权**（它要重写自己的 java_home.save） |
+| `pyghidra` 3.0.2 | 已装；但脚本仍推荐写 `.java`（见 §4.5） |
 | `objdump` / `monodis` / `gdb` | 备用：反汇编 / 程序集 IL / 调试 |
 
 ---
