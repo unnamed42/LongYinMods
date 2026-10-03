@@ -218,9 +218,13 @@ internal abstract class NativeHookBase
     ///
     /// <para>
     /// ⚠️ <b>会覆盖 rax</b>。仅当目标处**不依赖 rax 原值**时可用。
-    /// 若目标是一段**原有的代码**（而非你自己的跳转目标），
-    /// 请改用 <see cref="EmitJumpViaR11"/> —— 因为原代码常常依赖
-    /// 上一条指令在 <c>rax</c> 里留下的值。
+    /// </para>
+    ///
+    /// <para>
+    /// 🚫 <b>本项目现在不再使用它</b>：两个 hook 的出口都已改为「原版代码的落点」
+    /// （<c>0x180a8d8bc</c> / <c>0x180a8d92f</c> / <c>0x180a8da6b</c>），
+    /// 而原版代码**必须**保留 <c>rax</c>。新写 stub 请一律用 <see cref="EmitJumpViaR11"/>。
+    /// 保留此方法仅为将来「跳到自己的跳转目标」时使用。
     /// </para>
     /// </summary>
     protected static void EmitAbsoluteJump(List<byte> buffer, long target)
@@ -243,10 +247,9 @@ internal abstract class NativeHookBase
     /// </para>
     ///
     /// <para>
-    /// <c>r11</c> 是 Win64 的易失寄存器，本 mod 的三个跳转目标
-    /// （<c>0x180a8d8bc</c> / <c>0x180a8da6b</c> / <c>0x180a8d963</c>）后续代码均不读它
+    /// <c>r11</c> 是 Win64 的易失寄存器，本 mod 的跳转目标
+    /// （<c>0x180a8d8bc</c> / <c>0x180a8d92f</c> / <c>0x180a8da6b</c>）后续代码均不读它
     /// （已逐条核实）。
-    /// </para>
     /// </summary>
     protected static void EmitJumpViaR11(List<byte> buffer, long target)
     {

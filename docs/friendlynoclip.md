@@ -74,8 +74,45 @@ dump_all_grids = false    # 极慢，排查用
 **为什么改这里**：`MapNavigator` 同时服务「范围高亮」和「点击寻路」，**只改一处不会出现「格子亮了却走不过去」的分裂**。
 
 `FriendlyNoclip/FriendlyPassHook.cs` 在 `0x180a8d929` 处装 detour，比较 `selfTeamID`（`[rsp+0xd8]`）与 `g.battleUnit.battleTeam.ID`，**同队放行、异队跳过**。
+hook 点常量：`VaHookSite = 0x180A8D929`、`VaSkip = 0x180A8DA6B`、`VaPass = 0x180A8D92F`。
 
-hook 点常量：`VaHookSite = 0x180A8D929`、`VaSkip = 0x180A8DA6B`、`VaEmptyCell = 0x180A8D92F`、`VaExpand = 0x180A8D963`。
+### ★★ 修正（2026-10）：`FriendlyPassHook` 的出口也必须是 `0x180a8d92f`，不能是 `0x180a8d963`
+
+**真机症状（用户报告，并出现了回归）**：装了穿友方之后，**AI 会直接站到玩家所在的格子上**。
+
+**根因**：与 §2.2 的城墙 bug 是**同一类错误**。`0x180a8d963` 位于
+`0x180a8d92f` 处那个「空格链」**已经跑完之后** —— 而空格链里包含
+`AroundGridHaveEnemy(row, col, selfTeamID)`（`0x1808c41f0`，交战区 / 敌方邻接检查）。
+跳到 `0x180a8d963` 等于**跳过占位与交战区判定**，于是寻路被告知
+「队友所在的格子可以直接站上去」，AI 就把玩家的格子当成合法落点。
+
+**职责边界**：本 hook 只回答「**这个格子上的人是不是队友**」，
+**不回答**「**站到那个格子上合不合法**」。后者必须继续交给游戏。
+所以「队友格」与「空格」应当**合流**到同一条链（`0x180a8d92f`），
+而不是队友格走一条跳过检查的捷径。
+
+**修正后的 stub**（60 字节，两出口）：
+
+```
++0x00  test al, al
++0x02  je   <pass>        ; 无存活单位 -> 空格链
++0x04  mov  rax, [rsi+0x18]        ; g.battleUnit
++0x08  test rax, rax
++0x0B  je   <skip>        ; battleUnit == null
++0x0D  mov  rax, [rax+0x58]        ; battleUnit.battleTeam
++0x11  test rax, rax
++0x14  je   <skip>        ; battleTeam == null
++0x16  mov  eax, [rax+0x10]        ; battleTeam.ID
++0x19  cmp  eax, [rsp+0xd8]        ; selfTeamID
++0x20  je   <pass>        ; ★ 同队 -> 仍走空格链（不可直接接受！）
++0x22  skip  (0x180a8da6b)
++0x2F  pass  (0x180a8d92f)
+```
+
+> ⚠️ 旧文档曾写「把友方格交给 `AroundGridHaveEnemy` 判定，在混战中必然失败，已由实机验证」。
+> **那个结论是在错误的出口地址下得到的，已推翻** —— 当时「失败」里混杂了
+> 「逃掉交战区检查会把不可落的格子放行」这个因素。现在队友格与空格走同一条链，
+> 职责单一，不再需要绕过任何检查。
 
 ### 2.2b 能力来源：「只穿己方城墙」的原生 detour
 
@@ -166,9 +203,11 @@ if ((plVar11 != 0) && (*(int *)((longlong)plVar11 + 0x14) != 2)) { ... }
 让游戏自己的准入判定（`[r9+0x138]`）去裁决。它对本例中的己方城墙**返回通过**。
 stub 因此从 72 字节缩到 59 字节，且只剩两个出口。
 
-> **为何 `FriendlyPassHook` 用 `0x180a8d963` 却能工作**：那条路径落在**存活单位检查之后**，
-> 到 `expand` 时 `rsi` 等寄存器已经就位；而 `WallPassHook` 落点早得多（障碍检查），
-> 寄存器状态完全不同。**同一个地址不能假设在两条路径上都可用。**
+> **旧结论已推翻**：曾经认为「`FriendlyPassHook` 用 `0x180a8d963` 能工作，所以那个地址没问题」。
+> 实际上它**并不是能工作** —— 它只是**不崩**：同样跳过了 `AroundGridHaveEnemy`，
+> 导致「格子亮且能进范围」，但把「队友格子」错误地当成合法落点，
+> 于是 AI 会站到玩家头上（见 §2.2a）。**「没崩」不等于「对」。**
+> 两个 hook 现在都不再使用 `0x180a8d963`。
 
 ### 2.3 「穿越不留痕」：纯托管层的两步配合
 
@@ -522,11 +561,27 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 **【穿友方】`FriendlyPassHook`**（`0x180a8d929`）
 
 - `OriginalBytes = { 0x0F, 0x85, 0x3C, 0x01, 0x00, 0x00 }`（6 字节 `jne rel32`）
-- 布局：`+0` `test al,al`；`+2` `je <empty>`；`+4` `mov rax,[rsi+0x18]`；`+8` `test rax,rax`；`+11` `je <skip>`；`+13` `mov rax,[rax+0x58]`；`+17` `test rax,rax`；`+20` `je <skip>`；`+22` `mov eax,[rax+0x10]`；`+25` `cmp eax,[rsp+0xd8]`；`+32` `je <expand>`；随后三个 12 字节绝对跳转
-- 出口：`empty=0x180a8d92f`、`skip=0x180a8da6b`、`expand=0x180a8d963`
-- 这个 stub **用 `EmitAbsoluteJump`（经 rax）** —— 因为三个出口**都不读 `rax`**
-
-**【穿己方城墙】`WallPassHook`**（`0x180a8d8b6`，72 字节）
+- 布局（**60 字节，两出口** —— 2026-10 由三出口改为两出口）：
+  ```
+  +0x00  test al, al                  ; get_IsAlive(g.battleUnit)
+  +0x02  je   <pass>                  ; 无存活单位 -> 空格链
+  +0x04  mov  rax, [rsi+0x18]         ; g.battleUnit
+  +0x08  test rax, rax
+  +0x0B  je   <skip>
+  +0x0D  mov  rax, [rax+0x58]         ; battleUnit.battleTeam
+  +0x11  test rax, rax
+  +0x14  je   <skip>
+  +0x16  mov  eax, [rax+0x10]         ; battleTeam.ID
+  +0x19  cmp  eax, [rsp+0xd8]         ; selfTeamID
+  +0x20  je   <pass>                  ; ★ 同队 -> 空格链（不可直接接受！）
+  +0x22  -> skip (0x180a8da6b)
+  +0x2F  -> pass (0x180a8d92f)
+  ```
+- ⚠️ **两个出口都用 `EmitJumpViaR11`**（与 `WallPassHook` 统一）。
+  旧版用 `EmitAbsoluteJump`（经 `rax`）—— 当时以为三个出口都不读 `rax`，
+  现在出口改回 `0x180a8d92f`（原版代码），**更不能碰 `rax`**。
+- ❗ `jeSameTeam` 必须指向 `pass`。指向「直接接受」就是「AI 站到玩家头上」那个 bug。
+**【穿己方城墙】`WallPassHook`**（`0x180a8d8b6`，59 字节）
 
 - `OriginalBytes = { 0x0F, 0x84, 0xAF, 0x01, 0x00, 0x00 }`（6 字节 `je rel32`）
 - 布局：
@@ -541,11 +596,12 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
   +0x15  mov edx, [rcx+0x2c]         ; obstale.teamID
   +0x18  cmp edx, [rsp+0xd8]         ; == selfTeamID ?
   +0x1f  jne <skip>
-  +0x21  -> expand   (0x180a8d963)   ; 己方城墙 -> 放行
+  +0x21  -> pass     (0x180a8d8bc)   ; 己方城墙 -> 放行（与非障碍格同一出口）
   +0x2e  -> skip     (0x180a8da6b)
-  +0x3b  -> fallThrough (0x180a8d8bc)
+  
   ```
-- ⚠️ **三个出口全部用 `mov r11,imm64; jmp r11`**，`rax` 全程不动
+- ⚠️ **两个出口全部用 `mov r11,imm64; jmp r11`**，`rax` 全程不动
+- ⚠️ `VerifyStub` 接收**实际发射时的 rel8 偏移**，不写死 `code[5]/[14]/…`
 
 ### 6.2 为什么会写成 `EmitJumpViaR11`（血泪）
 
