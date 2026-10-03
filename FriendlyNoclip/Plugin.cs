@@ -229,10 +229,35 @@ public class Plugin : MelonMod
                 nameof(BattleController_BattleRealEnd_Postfix),
                 parameterCount: 0);
         }
+        // ★ 构建指纹：一行就能回答「现在跑的是哪个产物」。
+        //
+        // 本项目因为「跑的是旧产物」白耗过整整两轮，而症状是「代码不生效」——
+        // 与真正的逻辑 bug 无法区分。把构建时间/版本打出来，
+        // 以后一眼就能排除这一类可能（见 AGENTS.md §3.2）。
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        string buildInfo = "?";
+
+        try
+        {
+            // LinkerTimestamp 在很多构建下不准，改用程序集自带的
+            // InformationalVersion（若 csproj 未设则为 1.0.0）。
+            buildInfo = asm.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+                            ?.InformationalVersion
+                        ?? asm.GetName().Version?.ToString()
+                        ?? "?";
+        }
+        catch
+        {
+            // 取不到就算了，不能让日志影响启动。
+        }
+
         LoggerInstance.Msg(
             $"FriendlyNoclip 初始化完成：挂载 {patched} 个补丁" +
             $"，穿友方 detour={(FriendlyPassHook.Instance.Installed ? "已启用" : "未启用")}" +
-            $"，穿己墙 detour={(WallPassHook.Instance.Installed ? "已启用" : "未启用")}。");
+            $"，穿己墙 detour={(WallPassHook.Instance.Installed ? "已启用" : "未启用")}" +
+            $"，高亮 detour={(WallHighlightHook.Instance.Installed ? "已启用" : "未启用")}" +
+            $"，城门放行钩子 {(WallPassEnabled.Value ? "已注册" : "未注册")}。" +
+            $"【构建 {buildInfo}】");
     }
 
 

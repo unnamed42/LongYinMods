@@ -145,12 +145,18 @@ internal abstract class NativeHookBase
                 return false;
             }
 
-            if (!BytesEqual(current, OriginalBytes))
-            {
-                Plugin.Log.Warning(
-                    $"{Tag} 注意：0x{site.ToInt64():x} 处字节已被其他补丁改写" +
-                    $"（实际：{Hex(current)}，原始：{Hex(OriginalBytes)}），仍按当前形态安装。");
-            }
+            // ⚠️ 这里**不再**用 BytesEqual 去报告「字节被其他补丁改写」。
+            //
+            // 原因：子类的 OriginalBytes 里**带可变字段**（如 rel32 位移）时，
+            // 只能写占位值（0），于是与真实字节永远不等 ——
+            // 每次启动都会刷一条唬人的 WARNING，而实际什么都没被改写。
+            // 本项目实测：高亮 hook 的 10 字节形态里 rel32 两处不同，
+            // 每次都误报「已被其他补丁改写」。
+            //
+            // 形态正确性已经由子类的 ValidateSite 负责（它按字段分解校验），
+            // 这里就不再做一个必然会误报的宇节级比较。
+            //
+            // 保留能力：子类若确实想核对固定字节，可在自己的 ValidateSite 里做。
 
             byte[] code = BuildStub();
 

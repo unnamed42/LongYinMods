@@ -11,7 +11,14 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
-    <Version>1.0.0</Version>
+    <!-- 构建指纹：嵌一个「构建时刻」进去，启动日志会打出来。
+         本项目因为「跑的是旧产物」白耗过两轮，而症状是「代码不生效」——
+         与真正的逻辑 bug 无法区分。有这个时间戳，一眼就能判断。
+         （不用 LinkerTimestamp：它在很多构建配置下不准；
+           也不用静态的 1.0.0：那区分不了任何两次构建。） -->
+    <BuildStamp>$([System.DateTime]::UtcNow.ToString('yyMMdd-HHmmss'))</BuildStamp>
+    <Version>1.0.0+$(BuildStamp)</Version>
+    <InformationalVersion>$(BuildStamp)</InformationalVersion>
     <Authors>unnamed42</Authors>
     <Description>移动时允许穿越友方和城防</Description>
 
