@@ -218,3 +218,27 @@ c3                    ret
 > 另：`FailFast` 跑在触发它的线程上（如 MCP 的 socket 线程），**栈上没有游戏代码** —— 要验证符号化得让崩溃发生在游戏逻辑里。
 
 ---
+
+### 7.5 已知的工具缺口（想做但还没做）
+
+> 原本记在 `docs/melonmcp-tooling-requests.md`。那份清单里的 P0 与踩坑表
+> **已全部落地**并分别归入 §7.1 / §7.1.1，该文件已删除；以下几个**仍未实现**，
+> 留在这里以免丢失（需求来源是当时一次真实的排查）。
+
+| 工具 | 想解决的问题 | 难点 / 备注 |
+|---|---|---|
+| `hook_patch_info` 的 **`hitCount`** | 「补丁挂上了，但到底触发了几次」 | **未交付**。要么重新 patch 目标以插入计数，要么 hook Il2CppInterop 的 detour delegate。当前只能靠 mod 自己打的不受门控的日志（§5.2） |
+| `count_calls` | 不写代码就能数某函数被调用了几次 | 需要一个通用的「在入口插计数器」机制，与上面 `hitCount` 同一难点 |
+| `heap_objects` | 枚举某类型的**活对象** | `Il2CppObjectPool` **只是缓存，不是堆**；真正的路径是 `il2cpp_gc_heap_foreach`，需要额外导出 |
+
+**P2 那一批当时都未开工**，记录下来供参考：`snapshot` / `diff`（拍快照后 diff，自动化
+「某操作前后变了什么」）、`log_mark`（往日志插时间轴锚点）、`break_on` / `run_until`
+（REPL 里的轻量断点）、`stack_trace_native`（MelonLoader 0.7 有 `NativeStackWalk`，
+但 Windows-only 且首次要下 PDB，Proton 下行为待验证）、`register_dump`
+（等价于 gdb 的 `info registers` + `x/4i $pc`）。
+
+> ⚠️ 其中 **`hook_patch_info` 的 `hitCount` 是最值得补的一个**：它直接对应本项目
+> 反复踩的「挂载成功 ≠ 触发」问题，而目前唯一的替代品是「mod 自己打一条不受门控
+> 的日志」—— 靠人守纪律，不靠工具保证。
+
+---
