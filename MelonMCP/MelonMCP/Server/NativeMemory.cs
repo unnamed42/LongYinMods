@@ -97,6 +97,14 @@ namespace MelonMCP.Server
             data = null;
             if (address == 0 || length <= 0) return false;
 
+            // Validate the range against the process memory map BEFORE touching it.
+            //
+            // This is not belt-and-braces: a Marshal.Copy against an unmapped address does NOT raise a
+            // catchable managed exception on .NET 6 - it faults the process. The try/catch below would
+            // never run. A bad address therefore used to kill the game outright, which is exactly how
+            // a mis-normalised static VA took the process down.
+            if (!IsRangeMapped(address, length)) return false;
+
             try
             {
                 var buf = new byte[length];
@@ -109,6 +117,7 @@ namespace MelonMCP.Server
                 return false;
             }
         }
+
 
         public static bool TryReadUInt64(long address, out ulong value)
         {
@@ -246,5 +255,86 @@ namespace MelonMCP.Server
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern UIntPtr VirtualQuery(IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, UIntPtr dwLength);
+
+        /// <summary>
+        /// Windows MEMORY_BASIC_INFORMATION for x64. Field order matters and is taken from the SDK; do
+        /// not reshuffle it.
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MEMORY_BASIC_INFORMATION
+        {
+            public IntPtr BaseAddress;
+            public IntPtr AllocationBase;
+            public uint AllocationProtect;
+            public uint __alignment1;
+            public IntPtr RegionSize;
+            public uint State;
+            public uint Protect;
+            public uint Type;
+            public uint __alignment2;
+        }
+
+        private const uint MEM_COMMIT = 0x1000;
+        private const uint PAGE_NOACCESS = 0x01;
+        private const uint PAGE_GUARD = 0x100;
+
+        /// <summary>
+        /// True when [address, address+length) is committed and readable in the WINDOWS address space.
+        ///
+        /// Why VirtualQuery and not /proc/self/maps: under Proton the game runs as a Windows
+        /// process inside the Wine host. /proc/self/maps describes the LINUX host layout (entries
+        /// starting 0x55.. / 0x7f..), while GameAssembly.dll lives at Windows addresses such as
+        /// 0x6ffff... that simply do not appear there. An earlier version of this check parsed
+        /// /proc/self/maps and consequently rejected every legitimate game address, making the whole
+        /// native tool set unusable.
+        ///
+        /// Marshal.Copy faults the process on an unmapped address instead of raising a catchable
+        /// exception, which is why a pre-check is needed at all - VirtualQuery is the Windows-side
+        /// call that answers the same question in the correct address space.
+        /// </summary>
+        public static bool IsRangeMapped(long address, int length)
+        {
+            if (address <= 0 || length <= 0) return false;
+
+            long cursor = address;
+            long end = address + length;
+
+            // Walk the region chain; a single query covers one contiguous region, so a range that
+            // straddles a boundary needs more than one step. Bounded to avoid looping forever on a
+            // pathological map.
+            for (int guard = 0; guard < 64 && cursor < end; guard++)
+            {
+                UIntPtr got;
+                MEMORY_BASIC_INFORMATION mbi;
+                try
+                {
+                    got = VirtualQuery(new IntPtr(cursor), out mbi, (UIntPtr)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>());
+                }
+                catch (Exception)
+                {
+                    // VirtualQuery unavailable (non-Windows host): we cannot prove the range is bad,
+                    // so allow the read and let the caller's own error handling deal with it.
+                    return true;
+                }
+
+                if (got == UIntPtr.Zero) return false;
+
+                bool readable = mbi.State == MEM_COMMIT
+                             && (mbi.Protect & PAGE_NOACCESS) == 0
+                             && (mbi.Protect & PAGE_GUARD) == 0;
+
+                if (!readable) return false;
+
+                long regionEnd = mbi.BaseAddress.ToInt64() + mbi.RegionSize.ToInt64();
+                if (regionEnd <= cursor) return false;   // no forward progress
+
+                cursor = regionEnd;
+            }
+
+            return cursor >= end;
+        }
     }
 }

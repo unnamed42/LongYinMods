@@ -218,35 +218,49 @@ namespace MelonMCP.Tools
                     return "GameAssembly.dll";
             }
 
-            foreach (var r in NativeMemory.GetExecutableRegions())
+            // Everything outside the module image that is still readable is Wine/Win32-side memory the
+            // game allocated at runtime (the IL2CPP metadata, generated trampolines, JIT'd stubs).
+            //
+            // Note this deliberately does NOT consult /proc/self/maps: under Proton that file describes
+            // the LINUX host process, whose addresses (0x55.. / 0x7f..) are a different address space
+            // from the Windows one GameAssembly.dll lives in. Using it here once made every valid game
+            // address report as "<unmapped>".
+            if (NativeMemory.IsRangeMapped(address, 1))
             {
-                if (address >= r.Start && address < r.End)
-                {
-                    return (r.Path == null || r.Path.Length == 0)
-                        ? $"<anonymous r-xp {r.Size / 1024 / 1024} MB>"
-                        : r.Path;
-                }
+                return "<readable, outside module image>";
             }
 
             return "<unmapped>";
         }
 
-        /// <summary>
-        /// Accepts either a runtime address or a static VA, so callers can paste addresses straight
-        /// out of Ghidra/objdump. Static VAs are recognised by being far below the runtime module
-        /// base and in the 0x18xxxxxxx range.
-        /// </summary>
+        /// Accepts either a runtime address or a static VA, so callers can paste addresses straight out
+        /// of Ghidra/objdump.
+        ///
+        /// A static VA is recognised purely by lying inside the module's static image range. Under
+        /// Proton the runtime base is far higher (0x6fff...), so the two ranges never overlap and no
+        /// magnitude heuristic is needed.
+        ///
+        /// NOTE: an earlier version additionally required `address &lt; 0x1_0000_0000`. That made the
+        /// branch unreachable, because 0x180000000 (6.4G) can never be less than 0x100000000 (4.3G).
+        /// Static VAs were therefore passed through unconverted, and the subsequent Marshal.Copy
+        /// against an unmapped 6 GB address killed the process outright instead of throwing a
+        /// catchable exception. Keep this range test simple and honest.
         internal static long NormalizeAddress(long address, out string how)
         {
             how = "runtime";
             if (address == 0) return 0;
 
-            // Static VAs are imagebase-relative and sit in the 0x180000000 range; runtime addresses
-            // under Proton are much higher. Compare against the actual module base rather than
-            // guessing from magnitude alone.
+            // A static VA lies in the module's own static image range, which is fixed by the PE header
+            // rather than by where the loader happened to map it this run.
             if (NativeMemory.TryResolveModule(out var moduleBase, out _))
             {
-                if (address >= 0x180000000L && address < moduleBase && address < 0x1_0000_0000L)
+                const long StaticImageBase = 0x180000000L;
+
+                // 0x10000000 (256 MB) comfortably exceeds this binary's real image size and sits far
+                // below any plausible runtime base, so the two ranges cannot be confused.
+                const long MaxImageSpan = 0x10000000L;
+
+                if (address >= StaticImageBase && address < StaticImageBase + MaxImageSpan)
                 {
                     var converted = NativeMemory.StaticVaToRuntime(address);
                     if (converted != 0)
