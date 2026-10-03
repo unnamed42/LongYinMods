@@ -221,9 +221,32 @@ namespace MelonMCP.Tools
     public class AddGameKnowledgeToolDefinition : ToolDefinitionBase
     {
         public override string Name => "add_game_knowledge";
-        public override string Description => @"Add a discovery to the game knowledge base.
-Categories include: 'console_commands', 'static_accessors', 'cheats', 'type_info', 'useful_methods', 'config', 'notes'.
-This persists knowledge across sessions so the AI remembers what works for each game.";
+        public override string Description => @"Record knowledge about the GAME ITSELF - its world, setting,
+ lore, rules, characters, items, factions, numeric systems and mechanics. This is for things that are
+true about the game as a product, independent of any mod.
+
+*** DO NOT STORE MOD-DEVELOPMENT KNOWLEDGE HERE. ***
+Not tool usage, not build recipes, not decompilation workflow, not gotchas, not native addresses,
+not field offsets, not call-chain conclusions, not patch designs. Those do NOT belong in this store:
+  - general tooling / build / API knowledge  -> the repository's AGENTS.md
+  - game-specific addresses, offsets, call chains, measured behaviour -> the repo's docs/<project>.md
+
+Why it matters: this file lives at <game>/UserData/MelonMCP/game_knowledge.json - inside the GAME
+directory, not in any repository. It is not version-controlled, does not travel with the project, and
+is lost on a reinstall / verify / machine change. Other agents reading AGENTS.md or docs/ cannot see
+it. It survives across MCP sessions on ONE machine; it is NOT a substitute for repo documentation.
+
+Example of what belongs here: 'Faction X is hostile to Y', 'item Z restores N stamina',
+'the in-game date advances one year per season'.
+
+Persists across MCP sessions for the current game.";
+
+        /// <summary>
+        /// Reminder surfaced in the schema too, because the description alone is easy to skim past.
+        /// </summary>
+        private const string ScopeReminder =
+            "Game lore/setting/rules ONLY. Mod-development knowledge (tooling, addresses, offsets, "
+            + "build recipes, gotchas) belongs in AGENTS.md or docs/<project>.md - NOT here.";
 
         public override bool RequiresMainThread => false;
 
@@ -236,7 +259,8 @@ This persists knowledge across sessions so the AI remembers what works for each 
                     ["category"] = new ToolPropertySchema
                     {
                         Type = "string",
-                        Description = "Category of the discovery (e.g., 'console_commands', 'static_accessors', 'cheats', 'type_info', 'useful_methods', 'config', 'notes')"
+                        Description = "Category. Prefer game-content categories: 'lore', 'world', 'characters', "
+                                    + "'items', 'factions', 'mechanics', 'rules', 'numeric_systems'. " + ScopeReminder
                     },
                     ["key"] = new ToolPropertySchema
                     {
@@ -246,7 +270,7 @@ This persists knowledge across sessions so the AI remembers what works for each 
                     ["value"] = new ToolPropertySchema
                     {
                         Type = "string",
-                        Description = "The actual value/code/command that works"
+                        Description = "The knowledge itself. NOTE: " + ScopeReminder
                     },
                     ["description"] = new ToolPropertySchema
                     {
@@ -310,9 +334,15 @@ This persists knowledge across sessions so the AI remembers what works for each 
     public class GetGameKnowledgeToolDefinition : ToolDefinitionBase
     {
         public override string Name => "get_game_knowledge";
-        public override string Description => @"Query the game knowledge base to retrieve previously discovered information.
-Can retrieve all knowledge for the current game, a specific category, or search by tags.
-Use this to check what has been learned about a game before exploring.";
+        public override string Description => @"Query the stored knowledge about the GAME ITSELF - its world,
+ setting, lore, rules, characters, items, factions and mechanics.
+
+Scope note: this store deliberately holds NO mod-development knowledge. Tooling, build recipes,
+decompilation workflow, gotchas, native addresses, field offsets, call chains and patch designs live
+in the repository's AGENTS.md and docs/<project>.md instead. If you are looking for those, read the
+repo - do not expect to find them here.
+
+Can retrieve everything for the current game, one category, or filter by tags.";
 
         public override bool RequiresMainThread => false;
 
@@ -433,9 +463,11 @@ Use this to check what has been learned about a game before exploring.";
     public class GetGameSummaryToolDefinition : ToolDefinitionBase
     {
         public override string Name => "get_game_summary";
-        public override string Description => @"Get a quick summary of all knowledge for the current game.
-Returns categorized counts and key discoveries. Use this first when connecting to a game
-to see what has already been learned.";
+        public override string Description => @"Get a quick summary of stored knowledge for the current game:
+categorized counts and key entries. Use this first when connecting to a game.
+
+Reminder: this store is for the GAME's own lore/setting/rules. Mod-development knowledge lives in the
+repository's AGENTS.md and docs/<project>.md, not here.";
 
         public override bool RequiresMainThread => false;
 
