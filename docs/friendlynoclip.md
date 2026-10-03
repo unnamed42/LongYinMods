@@ -6,10 +6,17 @@
 >
 > 通用工具用法见 `AGENTS.md`，不重复。
 
-**状态**：✅ **「穿越友方」+「穿越不留痕」已闭环**（用户 m01137 确认）。
-⚠️ **「穿越己方城墙」代码已完成，但尚未实机验证** —— 判据需要 `obstale.teamID == selfTeamID`，
-即玩家守城的战斗。已完成的只是回归验证：当前攻方场景下「不崩 + 穿不过敌方城墙 + 穿友方正常」。详见 §8。
+**状态**：✅ **两个功能均已实机确认可用**
 
+- **穿友方**（用户 m01137 确认）
+- **穿越己方城墙**（用户 m-confirmed：「已达成穿越城墙的效果」）
+
+**核心实现已收敛**（2026-10-04）：不再依赖 hook 改「高亮」侧，
+而是在战斗开局直接写 **`GridUnitData.passes`** —— 见 §2.2c。
+> ⚠️ 本文件下面 §2.2b 保留了「用 `WallPassHook` 改 `Navigate` 判定」的推演过程，
+> 那些探索**大部分已被 `passes` 方案取代**（这也是当时一直不生效的原因 ——
+> 障碍格的 `passes=0` 使 `Navigate` 的搜索循环根本不执行）。
+> **先读 §2.2c，再回头看历史推演。**
 ---
 
 ## 1. 目标
@@ -37,24 +44,35 @@
 
 ## 2. 实现
 
-### 2.1 两个开关，各管一件事
+### 2.1 开关一览（含已弃用的）
 
 ```toml
 [FriendlyNoclip]
-native_detour = true      # ★ 「能穿友方」的能力本身
-wall_pass     = true      # ★ 「能穿己方城墙」
-fix_occupancy = true      # ★ 「穿越不留痕」
-diagnostics   = false     # 平时关掉，日志量大
-dump_all_grids = false    # 极慢，排查用
-```
+# ——— 功能开关（日常只需要这三个）———
+native_detour = true         # ★ 能穿友方单位
+wall_pass     = true         # ★ 能穿己方城墙（写 passes）
+fix_occupancy = true         # ★ 穿越不留痕（写回被踩掉的登记）
 
-> ⚠️ **三个功能性开关的分工必须分清**（曾因混淆而误判一轮）：
+# ——— 城防的两个原生 detour（二分级）———
+wall_pass_hook      = true   # WallPassHook（改 Navigate）—— 安全，保留
+wall_highlight_hook = false  # ★ 保持关闭：已验证会崩溃且非功能所需（§7.1c）
+
+# ——— 诊断（平时关）———
+diagnostics    = false
+dump_all_grids = false
+```
 
 | 开关 | 作用 | 关掉会怎样 |
 |---|---|---|
 | `native_detour` | `Navigate` 内 `0x180a8d929` 的 detour，**允许穿过友方单位** | **穿不过友方** |
-| `wall_pass` | `Navigate` 内 `0x180a8d8b6` 的 detour，**允许穿过己方城墙** | 穿不过己方城墙（其余不受影响） |
+| `wall_pass` | 写 `GridUnitData.passes`（§2.2c），**允许穿过己方城墙** | 穿不过己方城墙 |
 | `fix_occupancy` | `EnterGrid` Prefix + `OnLeave` Postfix，**写回被踩掉的登记** | 能穿，但**被穿的 NPC 点不动** |
+| `wall_pass_hook` | `Navigate` 内 `0x180a8d8b6` 的 detour | 不影响（已被 `passes` 方案覆盖） |
+| `wall_highlight_hook` | 改 `GetMoveRangeGrids` 的两处判定 | **无影响，且它开着会崩** |
+
+> ⚠️ **旧配置里的僵尸键**：`wall_ignore_team` 与 `wall_native_hooks` 均已删除，
+> 但 MelonPreferences **不会自动清理旧键**，它们会一直留在 cfg 里且无人读取。
+> 看到它们直接删掉即可。
 
 ### 2.2 能力来源：「只穿友方」的原生 detour
 
@@ -208,6 +226,82 @@ stub 因此从 72 字节缩到 59 字节，且只剩两个出口。
 > 导致「格子亮且能进范围」，但把「队友格子」错误地当成合法落点，
 > 于是 AI 会站到玩家头上（见 §2.2a）。**「没崩」不等于「对」。**
 > 两个 hook 现在都不再使用 `0x180a8d963`。
+### 2.2c ★ 最终方案：「城墙可跨越」= 写 `GridUnitData.passes`
+
+这是城墙功能**真正生效**的实现，也是整个项目最关键的发现。
+
+**根因：`Navigate` 的搜索上限是 `from.row × from.passes`，而障碍格的 `passes` 恒为 0。**
+
+```
+0x180a8d6df  call 0x1808CA250      ; 符号名 BattleMapData.get_GridCount
+0x180a8d6eb  mov  [rsp+0x38], eax  ; 存为循环上界 iVar3
+
+0x1808CA250: mov eax,[rcx+0x24]    ; GridUnitData.row
+             imul eax,[rcx+0x20]   ;  × GridUnitData.passes
+             ret
+```
+
+⚠️ 这里 `rcx` 实际是 **`from`（GridUnitData）**，不是 `BattleMapData`
+（序言 `mov rsi,rdx` 已核实）。所以：
+
+| 起点 | `passes` | 搜索上限 | 后果 |
+|---|---|---|---|
+| 空地 | 15 | 75 | 正常搜索 |
+| **城墙** | **0** | **0** | **主循环一次都不执行** |
+
+→ 从城墙格出发的搜索**永远不跑**，所以城墙**不可能作为中转节点**，
+跨墙**从原理上做不到** —— 无论怎么调判定、怎么选出口地址都没用。
+
+**实测证据（A/B，同一场战斗）**：
+
+| 起点 `(5,12)`，范围 3 | 格子数 | 包含的格子 |
+|---|---|---|
+| `passes=0`（原版） | 13 | 不含 `(5,14)` |
+| `passes=15` | 16 | **多出 `(5,14)(5,15)(6,14)`** ← 墙对面 |
+
+两次 `walls` 都是 0 —— **城墙自己始终不入高亮**。
+
+#### 为什么这正好满足需求
+
+需求是「**城墙不可停留，但能从上面跨过去**」。`passes` 一改，两边同时满足：
+
+- `GetMoveRangeGrids` 里有独立的 `gridType != 2` 拦阻 → **城墙永不入高亮**
+  → 不可点、不可停留 ✅
+- `Navigate` 能把城墙当中转格 → **可跨越** ✅
+
+而且「亮」与「走」由**同一个 `Navigate`** 回答，不会出现「亮了却走不过去」。
+
+#### 实现：`WallPassData` + 两个 Harmony 钩子
+
+| 时机 | 钩子 | 动作 |
+|---|---|---|
+| 战斗开局 | `BattleMapData.GenerateMapObjs` Postfix | 对己方城墙写 `passes=15` |
+| 战斗结束 | `BattleController.BattleRealEnd` Postfix | 按记录的原值回滚 |
+
+**为什么是 `GenerateMapObjs` 而不是 `Generate`**：后者只做**布局**，
+跑完时 `obstacleGrids` 还是空的 —— 实测会打印「已放行 **0** 面己方城墙」。
+真实创建链：
+
+```
+BattleController.PrepareBattleMap
+  ├─ BattleMapData.Generate()        @0x180816368   ← 太早
+  └─ BattleMapData.GenerateMapObjs() @0x18081683f   ← 钩这里 ✅
+       └─ GenerateBuildingObstacle
+            ├─ GenerateWallData      ← 城墙在这里诞生
+            └─ GenerateObstacleData
+```
+
+**定向写入，绝不批量**：只写 `obstacleType == Wall && teamID == selfTeamID`
+的格子。按类别批量写会连**中立造景**（树/木箱，同样是 `gridType==2`）一起放行。
+实测：只改己方城墙时，21 个中立障碍**全部仍被阻挡**。
+
+**`passes` 是分类标记而非逐格调优值**：`normalGrids` 357 格全部 = 15，
+`obstacleGrids` 43 格全部 = 0，各自只有 1 种取值。所以写 15 是「恢复成
+一个游戏本身就在用的合法值」。
+
+> ⚠️ **未解风险**：`passes` 的**写入者至今未定位**，也无法确认除 `Navigate` 外
+> 还有谁读它。因此采用「进战斗置位 / 结束恢复」的可回滚策略，
+> 改动不落到存档。
 
 ### 2.3 「穿越不留痕」：纯托管层的两步配合
 
@@ -492,7 +586,26 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 16. **偏移不要手算**。stub 的 rel8 回填曾因「指令布局改了、偏移没跟着改」而错乱。
     现改为：发射时 `AddRel8()` 返回实际偏移 → `PatchRel8()` 回填 → `VerifyStub()` 反查每条跳转的目的地。
     算错会在安装瞬间写入 `ERROR` 日志，而不是变成玄学现象。
-
+17. ★★ **「输入对、判定对、但就是不生效」时，要去查【上限/计数/容量】这类边界参数，
+    而不是继续在判定逻辑里找。** 本项目在城墙问题上反复走错（四次：`expand` 出口、
+    `fallThrough` 出口、栈损坏误判、高亮方案），最后发现真因是
+    **`Navigate` 的搜索上限 = `from.row × from.passes`，而障碍格 `passes=0`** ——
+    搜索循环**根本一次都没跑**。再怎么调判定都无济于事。
+18. **不能只看一个函数的「返回值」就断定行为**。`Navigate` 对「空→墙」返回 `True`，
+    于是曾误判「能穿墙」——但**必须看它返回的 `path` 内容**：实际是 12 步绕路。
+    （返回值只说「总体可达」，不说「怎么走」。）
+19. **符号名会误导类型判断**。`0x1808CA250` 符号名是 `BattleMapData.get_GridCount`，
+    但 `Navigate` 调用它时 `rcx` 是 **`GridUnitData`** —— 实际算的是 `passes × row`。
+    看符号后仍要结合**调用点的寄存器内容**判断。
+20. **钩子不能钩得太早或太晚**。`BattleMapData.Generate` 只做布局，跑完时
+    `obstacleGrids` 还是空的（实测打印「已放行 **0** 面」）；必须在
+    `GenerateMapObjs`（障碍物的真正创建处）之后。
+21. **「补丁已挂上」≠「代码跑了」**。本项目有两次都是 `patcherIsValid=true`、
+    `attached=true`，但 postfix 因为**注册晚于该时机**而从没执行过。
+    → 排查时先看**自己代码打的那条日志**，而不是 Harmony 的「已挂上」。
+22. **永远先确认「跑的是哪个构建」**。本项目因跑旧产物白耗过两轮，而症状就是
+    「代码不生效」—— 与真正的逻辑 bug **无法区分**。
+    现在启动日志会打**构建指纹**（构建时刻 + git SHA）。
 ---
 
 ## 5. 已否定方案（**别再试**）
@@ -539,19 +652,26 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 ## 6. 代码状态
 
 **构建**：`dotnet build FriendlyNoclip/FriendlyNoclip.csproj -c Debug`
-**产物**：`FriendlyNoclip/bin/Debug/net6.0/FriendlyNoclip.dll`，md5 **`79ae85f82992323a8e4fd2aeb7d402f2`**，46592 字节，**0 错误 0 警告**。
+**产物**：`FriendlyNoclip/bin/Debug/net6.0/FriendlyNoclip.dll`，**0 错误 0 警告**。
 
-> ⚠️ 部署后**务必核对 md5** —— 本项目因测了旧 DLL 而白耗过两轮。
+> ✅ 启动日志会打印**构建指纹**（如 `【构建 261003-162826+00cff6c7…】`），
+> 是 csproj 注入的构建时刻 + git SHA。
+> **看日志就能确认跑的是哪个产物**，不必再靠 md5 猜。
+> 部署仍应核对 md5（本体因测旧 DLL 白耗过两轮）。
 
 | 文件 | 状态 |
 |---|---|
-| `FriendlyNoclip/NativeHookBase.cs` | **抽象基类** —— 安装/卸载骨架 + 共用工具（`RuntimeVa` / `EmitAbsoluteJump` / `EmitJumpViaR11` / `IsRel32Jcc` / `BytesEqual` / `Hex`）。子类只写差异：`Tag` / `HookVa` / `OriginalBytes` / `ValidateSite` / `BuildStub` |
-| `FriendlyNoclip/FriendlyPassHook.cs` | **穿友方** —— hook `0x180a8d929`，按 `battleTeam.ID` 判队伍 |
-| `FriendlyNoclip/WallPassHook.cs` | **穿己方城墙** —— hook `0x180a8d8b6`，按 `obstalceType + teamID` 判；含 `AddRel8`/`PatchRel8`/`VerifyStub` |
-| `FriendlyNoclip/NativeMemory.cs`（286 行） | **有效** —— 模块定位 / 签名扫描 / 原生读写 / `VirtualProtect` |
+| `NativeHookBase.cs` | **抽象基类** —— 安装/卸载骨架 + 共用工具（`RuntimeVa` / `EmitJumpViaR11` / `IsRel32Jcc` / `Hex`）。子类只写差异：`Tag` / `HookVa` / `HookSiteVa` / `OriginalBytes` / `ValidateSite` / `BuildStub` |
+| `FriendlyPassHook.cs` | **穿友方** ✅ 在用 —— hook `0x180a8d929`，按 `battleTeam.ID` 判队伍 |
+| **`WallPassData.cs`** | **★ 穿己方城墙的核心** ✅ 在用 —— 写 `GridUnitData.passes`（§2.2c） |
+| `WallPassHook.cs` | 改 `Navigate` 的判定 ✅ 在用（`wall_pass_hook`），但**城墙功能已不再依赖它** |
+| `WallHighlightHook.cs` | ⚠️ **实验性、已验证会崩溃、默认关闭**（`wall_highlight_hook=false`）。保留仅为记录与将来可能的重做 |
+| `NativeProbeLog.cs` | 回溯探针 —— **默认不启用**（每进 hook 写 112 字节 + 2s 落盘，有开销）。保留供将来排查 |
+| `NativeMemory.cs` | 模块定位 / 签名扫描 / 原生读写 / `VirtualProtect` / `WriteInt32` |
 
-**已删除**：`NativeOnEnterDetour.cs`（前提错误 + 尾调用崩溃）、`NativePatchProbe.cs`、`NativeProbe.cs`；开关 `native_probe` / `native_patch_probe` / `native_onenter_detour` / `allow_friendly`；函数 `CallerReturnAddress()`。
-
+**已删除**：`NativeOnEnterDetour.cs`（前提错误 + 尾调用崩溃）、`NativePatchProbe.cs`、`NativeProbe.cs`；
+开关 `native_probe` / `native_patch_probe` / `native_onenter_detour` / `allow_friendly` /
+`wall_ignore_team` / `wall_native_hooks`；函数 `CallerReturnAddress()`。
 **诊断开关 `diagnostics`**：打开后打印 `[审计]` / `[点击]` / `[染色]` / `[普查]` / `[登记]` / `[穿越]`。`[命中] OnLeave 第 N 次` 与 `[修复·登记]` **不受门控**，始终打印。
 
 **git 提交序列**：`acd50b7 initial commit` → `e8c8e65 feat: (incomplete) noclip for the friendly` → `38282f0 feat: 穿越友方 + 穿越不留痕（功能闭环）` → `98d8a17 chore: 清理配置项，只保留 4 个`。
@@ -813,24 +933,31 @@ Navigate((5,12) -> (5,13)) = ok len=1 searched=1     ← 起点是空地，搜�
 
 | # | 事项 | 状态 |
 |---|---|---|
-| 1 | ~~城墙/城防穿越~~ | ✅ **已修复并定性**。出口从 `0x180a8d963` 改为 `0x180a8d8bc`，
-活进程三方对照证实 `Navigate` 对相邻己方城墙格返回 **True**。**待用户实机确认。** |
-| 2 | ~~验证 `expand` 路径~~ | ✅ **已结案：`expand` 是错的**（§2.2）。它位于准入判定**之后**，
-跳过判定且寄存器依赖不成立。改用 `0x180a8d8bc`（pass）后两出口合一。 |
+| 1 | 城墙/城防穿越 | ✅ **已完成并实机确认可用**。最终实现是写 `GridUnitData.passes`（§2.2c），不是 hook 判定 |
+| 2 | 城墙穿越崩溃 | ✅ **已结案**，由 `WallHighlightHook` 引起，已默认关闭（§8.1） |
 | 4 | 「穿越不留痕」的时序验证 | `OnLeave` 在**离开**时触发，而覆盖发生在 **`OnEnter`** 时刻。若游戏在两格之间做了别的读取（如渲染），修复可能**太晚**。判据：若出现「中途闪一下被穿单位的模型消失」，说明太晚 → 需转「手写 `OnEnter` 替代实现」 |
 | 5 | 箭塔/战鼓/分舵是否会被误穿 | 实测它们是**普通 `BattleUnit`**（`g.obstale == null`），归「穿友方」那条线按队伍处理。**当前无异常**，但守城战里需再看一眼 |
 
-### 8.1 城墙穿越崩溃（2026-10-04，未结案）
+### 8.1 ✅ 城墙穿越崩溃（2026-10-04，**已结案**）
 
-**现象**：`passes` 已正确写入（日志 `已放行 22 面己方城墙`），随后战斗崩溃。
+**结论：由 `WallHighlightHook` 引起，且它并非功能所需 → 默认关闭，问题消失。**
 
-**崩溃现场**（`tools/il2cpp_unwind.py` 分析 `crash_1791043849.dmp`）：
+**二分过程**（每轮均冷启动，日志以构建指纹核实版本）：
+
+| 轮次 | 配置 | 结果 |
+|---|---|---|
+| 1 | `wall_native_hooks=false` | **不崩**（`passes` 仍在，22 面）→ 排除数据写入与既有问题 |
+| 2 | `wall_pass_hook=true` + `wall_highlight_hook=false` | **不崩，且城墙穿越可用** ✅ |
+
+**为何高亮 hook 不是必需的**：`passes` 已让 `Navigate` 能穿墙；
+而墙对面格子亮不亮，本来就由**游戏自己的** `GetMoveRangeGrids` 调 `Navigate` 决定。
+
+**崩溃现场（存档）** —— 与结论一致：
 
 ```
 exception : none recorded        <- FailFast/abort，不是野指针
 #0        <ntdll.dll+0xEA94>    <- Wine 的 syscall 跳板，不是崩溃点
 #9        BattleController::RunBattle+0x17C3
-#10       BattleController::Update+0xCB3
 ```
 
 **`RunBattle+0x17C3` 的反汇编**（就在一条调用之后）：
@@ -850,21 +977,15 @@ AISettingControlable(...);
 ```
 
 → 每个 AI 单位的回合都会经由 `GetMoveRangeGrids` 算移动范围，
-而 **`WallHighlightHook` 正是往这个函数里装两个 `ff25` detour**。
+而 `WallHighlightHook` 正是往这个函数里装两个 `ff25` detour
+—— **与二分的结论完全一致**。
 
-**结论强度（重要）**：
-
-- ✅ 与「高亮 hook 有嫌疑」**一致**
-- ❌ **但不是证据**：FailFast 不产生硬件异常，dump 里没有 Exception 流；
-  且帧标着 `(stack scan)`（启发式恢复的返回地址，不保证是精确 IP）
-- dump **看不到故障指令**（`DOTNET_DbgMiniDumpType=1` 不抓模块映像）
-
-**已做**：拆出 `wall_native_hooks` 开关（单独控制 `WallPassHook` + `WallHighlightHook`），
-`passes` 数据写入仍保留 —— 用于二分。
-
-**待办**：`wall_native_hooks=false` 冷启动打完一场 →
-- 不崩 ⇒ 定位到原生 detour，再细分 `WallPassHook` vs `WallHighlightHook`
-- 还崩 ⇒ 与原生 hook 无关，嫌疑转向 `passes` 数据写入或既有问题
+> ⚠️ **保留这段的价值：dump 只能做到「指出嫌疑」，不能「定罪」。**
+> 当时列出的局限仍然成立：FailFast 不产生硬件异常（无 Exception 流），
+> 帧标着 `(stack scan)`（启发式恢复的返回地址，不保证是精确 IP），
+> 且 `DOTNET_DbgMiniDumpType=1` 不抓模块映像（看不到故障指令）。
+> **真正定案靠的是二分实验，不是 dump。**
+（当时列的待办已完成，见上方二分表。）
 
 ---
 

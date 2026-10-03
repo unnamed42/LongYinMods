@@ -4,6 +4,29 @@ using System.Collections.Generic;
 namespace Unnamed42.FriendlyNoclip;
 
 /// <summary>
+/// <b>⚠️ 实验性：本类会导致崩溃，默认关闭（<c>wall_highlight_hook=false</c>），
+/// 且已被证实并非功能所必需。</b>
+///
+/// <para><b>2026-10-04 二分结论（实机确认）</b></para>
+/// <list type="number">
+///   <item>开启本 hook → 打完一场**必崩**（FailFast）；关闭 → 不崩，
+///     且**城墙穿越依然正常可用**。</item>
+///   <item>崩溃的 dump 显示故障帧紧跟 <c>call GetMoveRangeGrids</c> 之后，
+///     与本类装的两个 <c>ff25</c> detour 位置完全对应。</item>
+///   <item><b>为什么它不是必需的</b>：<c>WallPassData</c> 写 <c>passes</c> 之后，
+///     <c>Navigate</c> 已经能穿墙；而「墙对面格子亮不亮」本来就由**游戏自己的**
+///     <c>GetMoveRangeGrids</c> 调 <c>Navigate</c> 来决定 ——
+///     那一侧不需要我们去改判定。</item>
+/// </list>
+///
+/// <para>
+/// <b>保留本类的原因</b>：它记录了一次完整的排查，且「让城墙格本身也亮」
+/// （当前语义是「不可停留」，所以城墙**不该**亮）这个需求将来可能还会出现。
+/// 若要用它，需先查清崩溃原因 —— 怀疑与「无条件放行」有关：
+/// 障碍格被送进普通格的后续代码路径，而那条路径假定格子不是障碍。
+/// </para>
+///
+/// <para><b>原始设计意图（供参考）</b></para>
 /// 「范围高亮」侧的障碍格放行 —— <c>BattleMapData.GetMoveRangeGrids</c> 内的两处
 /// <c>gridType == Obstacle → 跳过</c>。
 ///
