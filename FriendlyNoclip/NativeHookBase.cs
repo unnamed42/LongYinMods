@@ -128,9 +128,6 @@ internal abstract class NativeHookBase
                     $"（实际：{Hex(current)}，原始：{Hex(OriginalBytes)}），仍按当前形态安装。");
             }
 
-            // 探针缓冲区必须在 BuildStub **之前**分配 —— stub 里会内联它的绝对地址。
-            NativeProbeLog.Initialize();
-
             byte[] code = BuildStub();
 
             _stub = NativeMemory.AllocateExecutable(code.Length);

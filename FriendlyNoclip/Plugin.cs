@@ -128,17 +128,14 @@ public class Plugin : MelonMod
         if (WallPassEnabled.Value)
         {
             WallPassHook.Instance.Install();
+
+            // ★ 高亮侧：GetMoveRangeGrids 有**两套独立的**障碍格判定，
+            //   与 Navigate 那套互不相干。只 hook Navigate 时，城墙格
+            //   明明可达（Navigate 返回 true）却永远不亮。
+            WallHighlightHook.Instance.Install();
+            WallHighlightHook.Instance.InstallSecondGate();
         }
 
-        // ★ 回溯探针的快照线程：任何 hook 装好后就启动。
-        //   它把 hook 的进入现场（rsp + 栈内容）持续写盘 ——
-        //   进程崩溃时内存会丢，只有落盘的那份能留下。
-        if (FriendlyPassHook.Instance.Installed || WallPassHook.Instance.Installed)
-        {
-            string probePath = System.IO.Path.Combine(
-                MelonLoader.Utils.MelonEnvironment.GameRootDirectory, "FriendlyNoclip_probe.txt");
-            NativeProbeLog.StartFlusher(probePath);
-        }
 
         int patched = 0;
         patched += TryPatch(

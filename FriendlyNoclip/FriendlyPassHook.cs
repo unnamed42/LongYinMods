@@ -127,11 +127,7 @@ internal sealed class FriendlyPassHook : NativeHookBase
         long skip = RuntimeVa(VaSkip);
         long pass = RuntimeVa(VaPass);
 
-        var stub = new List<byte>(220);
-
-        // ★ 探针：必须在任何条件判断之前 —— 这样无论走哪条分支都能记到。
-        //   只读栈 + 写环形缓冲，不改语义。hookId=1 表示穿友方。
-        NativeProbeLog.EmitRecordEntry(stub, hookId: 1);
+        var stub = new List<byte>(70);
 
         // +0  test al, al
         stub.AddRange(new byte[] { 0x84, 0xC0 });

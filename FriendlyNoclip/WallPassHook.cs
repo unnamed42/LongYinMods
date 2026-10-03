@@ -150,11 +150,8 @@ internal sealed class WallPassHook : NativeHookBase
         long skip = RuntimeVa(VaSkip);
         long pass = RuntimeVa(VaPass);
 
-        var stub = new List<byte>(220);
+        var stub = new List<byte>(72);
 
-        // ★ 探针：必须在任何条件判断之前 —— 这样无论走哪条分支都能记到。
-        //   只读栈 + 写环形缓冲，不改语义。hookId=2 表示穿城墙。
-        NativeProbeLog.EmitRecordEntry(stub, hookId: 2);
         // ★★ 关键：hook 点在 `je` 上，**两种情况都会执行到**：
         //   ① g.gridType == Obstacle  → 原本会跳（障碍格被排除）
         //   ② g.gridType != Obstacle  → 原本不跳，落到 0x180a8d8bc 继续
