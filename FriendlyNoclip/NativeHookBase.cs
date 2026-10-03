@@ -64,8 +64,29 @@ internal abstract class NativeHookBase
     /// <summary>日志前缀，如 <c>[原生 detour]</c> / <c>[城防 detour]</c>。</summary>
     protected abstract string Tag { get; }
 
-    /// <summary>hook 点的静态 VA（imagebase <c>0x180000000</c>）。</summary>
+    /// <summary>
+    /// <b>校验基准</b>的静态 VA（imagebase <c>0x180000000</c>）。
+    /// 从该地址开始读 <see cref="OriginalBytes"/>.Length 字节交给 <see cref="ValidateSite"/>。
+    /// </summary>
     protected abstract ulong HookVa { get; }
+
+    /// <summary>
+    /// <b>hook 落点</b>的静态 VA。默认等于 <see cref="HookVa"/>。
+    ///
+    /// <para>
+    /// 【为什么需要它】有些 hook 的「校验单元」与「替换单元」不是同一条指令：
+    /// 例如 <c>cmp dword [reg+0x14], 2</c>（4 字节）+ <c>je rel32</c>（6 字节）这种形态，
+    /// 校验需要看到整个 10 字节才能确认形态正确，
+    /// 而真正被替换的只有后面那条 6 字节的 <c>je</c>。
+    /// </para>
+    ///
+    /// <para>
+    /// 早期版本把两者混为一谈，导致：
+    /// 基类从 <c>cmp</c> 处读字节、却去 <c>je</c> 处挂钩（或反之），
+    /// 校验报出「不是 cmp …（实际 83 78 14 02）」这类错位信息。
+    /// </para>
+    /// </summary>
+    protected virtual ulong HookSiteVa => HookVa;
 
     /// <summary>落点原始字节，仅供日志展示「原始值」。</summary>
     protected abstract byte[] OriginalBytes { get; }
@@ -105,18 +126,21 @@ internal abstract class NativeHookBase
                 return false;
             }
 
-            IntPtr site = NativeMemory.StaticVaToRuntime(HookVa);
+            // 校验基准：通常是 HookVa（指令起点）。
+            // 落点另看 HookSiteVa —— 二者可以不同（见 HookSiteVa 的注释）。
+            IntPtr checkSite = NativeMemory.StaticVaToRuntime(HookVa);
+            IntPtr site = NativeMemory.StaticVaToRuntime(HookSiteVa);
 
-            if (!NativeMemory.TryReadBytes(site, OriginalBytes.Length, out byte[] current))
+            if (!NativeMemory.TryReadBytes(checkSite, OriginalBytes.Length, out byte[] current))
             {
-                Plugin.Log.Warning($"{Tag} 无法读取 0x{site.ToInt64():x} 的字节，跳过。");
+                Plugin.Log.Warning($"{Tag} 无法读取 0x{checkSite.ToInt64():x} 的字节，跳过。");
                 return false;
             }
 
             if (!ValidateSite(current, out string reason))
             {
                 Plugin.Log.Warning(
-                    $"{Tag} 0x{site.ToInt64():x} 落点校验失败，拒绝安装：{reason}" +
+                    $"{Tag} 0x{checkSite.ToInt64():x} 落点校验失败（落点 0x{site.ToInt64():x}），拒绝安装：{reason}" +
                     $"（实际：{Hex(current)}，原始：{Hex(OriginalBytes)}）");
                 return false;
             }

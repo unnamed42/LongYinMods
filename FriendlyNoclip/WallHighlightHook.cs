@@ -82,8 +82,6 @@ internal sealed class WallHighlightHook : NativeHookBase
     /// <summary>两条 <c>je</c> 都紧跟 4 字节的 <c>cmp</c>，所以 jcc 本身固定偏移 +4。</summary>
     private const int JccOffset = 4;
 
-    /// <summary>6 字节 rel32 jcc。</summary>
-    private static readonly byte[] OriginalBytes_ = { 0x0F, 0x84, 0x00, 0x00, 0x00, 0x00 };
 
     internal static readonly WallHighlightHook Instance = new();
 
@@ -94,6 +92,24 @@ internal sealed class WallHighlightHook : NativeHookBase
     protected override string Tag => "[高亮 detour]";
 
     protected override ulong HookVa => VaGateA;
+
+    /// <summary>gate A 的落点是 <c>je</c> 本身（在 <c>cmp</c> 之后 4 字节）。</summary>
+    protected override ulong HookSiteVa => VaGateA + JccOffset;
+
+    /// <summary>
+    /// 期望的落点形态：<c>cmp dword [reg+0x14], 2</c>（4 字节）+ <c>je rel32</c>（6 字节）。
+    ///
+    /// ⚠️ <b>必须是完整 10 字节</b>：<see cref="NativeHookBase.Install"/> 按
+    /// <c>OriginalBytes.Length</c> 决定读多少字节给 <see cref="ValidateSite"/>，
+    /// 而校验需要看到 <c>cmp</c> 与 <c>je</c> 两段。
+    /// 早期版本这里只写 6 字节，导致基准只读 6 字节、校验报「读取长度不足」。
+    ///
+    /// <para>
+    /// <c>je</c> 的 rel32 写 0 是因为它随两个 gate 而不同，不参与形态比对
+    /// （只验前两字节 <c>0F 84</c>）。
+    /// </para>
+    /// </summary>
+    private static readonly byte[] OriginalBytes_ = { 0x83, 0x78, 0x14, 0x02, 0x0F, 0x84, 0x00, 0x00, 0x00, 0x00 };
 
     protected override byte[] OriginalBytes => OriginalBytes_;
 
@@ -135,16 +151,35 @@ internal sealed class WallHighlightHook : NativeHookBase
     /// </summary>
     internal bool Installed2 { get; private set; }
 
-    /// <summary>第二个 gate 的独立安装（与主 gate 同一套校验 + 同一个 stub）。</summary>
+    /// <summary>
+    /// 第二个 gate 的独立安装（与主 gate 同一套校验 + 同一个 stub）。
+    ///
+    /// <para>
+    /// ⚠️ <b>两个地址要分清</b>：
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><b>校验基准</b> = <c>VaGateB</c>（<c>cmp</c> 的起始）——
+    ///     因为 <see cref="ValidateSite"/> 期望传入的就是以 <c>cmp</c> 开头的 10 字节。</item>
+    ///   <item><b>hook 落点</b> = <c>VaGateB + JccOffset</c>（<c>je</c> 本身）——
+    ///     我们替换的是那条 6 字节 <c>je</c>，不是前面的 <c>cmp</c>。</item>
+    /// </list>
+    /// 早期版本把校验基准与落点混为一谈（都读 <c>site</c>=落点，却按 <c>cmp</c> 开头解析），
+    /// 于是报「不是 cmp dword [reg+0x14], 2（实际 83 78 14 02）」——
+    /// 那四个字节恰好就是 <c>cmp</c> 本身，而读取起点错位在它之后。
+    /// </summary>
     internal bool InstallSecondGate()
     {
         try
         {
-            IntPtr site = NativeMemory.StaticVaToRuntime(VaGateB);
+            // 落点：je 本身（6 字节 rel32 jcc）。
+            IntPtr hookSite = NativeMemory.StaticVaToRuntime(VaGateB + JccOffset);
 
-            if (!NativeMemory.TryReadBytes(site, OriginalBytes.Length + JccOffset, out byte[] current))
+            // 校验基准：cmp 的起始，共 10 字节。
+            IntPtr checkSite = NativeMemory.StaticVaToRuntime(VaGateB);
+
+            if (!NativeMemory.TryReadBytes(checkSite, OriginalBytes.Length, out byte[] current))
             {
-                Plugin.Log.Warning($"{Tag} 无法读取 0x{site.ToInt64():x} 的字节，跳过 gate B。");
+                Plugin.Log.Warning($"{Tag} 无法读取 0x{checkSite.ToInt64():x} 的字节，跳过 gate B。");
                 return false;
             }
 
@@ -153,6 +188,7 @@ internal sealed class WallHighlightHook : NativeHookBase
                 Plugin.Log.Warning($"{Tag} gate B（0x{VaGateB:x}）校验失败，拒绝安装：{reason}");
                 return false;
             }
+
 
             // gate B 用同一个 stub 形态：放行 = 落到 je 的**下一条指令**（即 cmp 之后）。
             long fallThrough = (long)(VaGateB + JccOffset + 6);
@@ -165,10 +201,9 @@ internal sealed class WallHighlightHook : NativeHookBase
                 Plugin.Log.Warning($"{Tag} gate B 分配可执行内存失败。");
                 return false;
             }
-
             System.Runtime.InteropServices.Marshal.Copy(code, 0, stub, code.Length);
 
-            var hook = new MelonLoader.NativeUtils.NativeHook<DetourSignature>(site, stub);
+            var hook = new MelonLoader.NativeUtils.NativeHook<DetourSignature>(hookSite, stub);
             hook.Attach();
 
             if (!hook.IsHooked)
@@ -181,8 +216,8 @@ internal sealed class WallHighlightHook : NativeHookBase
             Installed2 = true;
 
             Plugin.Log.Msg(
-                $"{Tag} gate B 已挂上 0x{VaGateB:x}（运行时 0x{site.ToInt64():x}）→ stub 0x{stub.ToInt64():x}。" +
-                $"落点现状：{NativeMemory.HexDump(site, 10)}");
+                $"{Tag} gate B 已挂上 0x{VaGateB + JccOffset:x}（运行时 0x{hookSite.ToInt64():x}）" +
+                $"→ stub 0x{stub.ToInt64():x}。落点现状：{NativeMemory.HexDump(hookSite, 10)}");
 
             return true;
         }
