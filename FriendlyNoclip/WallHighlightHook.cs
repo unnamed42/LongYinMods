@@ -126,9 +126,24 @@ internal sealed class WallHighlightHook : NativeHookBase
             return false;
         }
 
-        // cmp dword ptr [rXX + 0x14], 2   —— ModRM 高两位是 10（disp32），
-        // 低三位任意寄存器；末字节为 2。
-        if (current[0] != 0x83 || (current[1] & 0xC0) != 0x80 || current[2] != 0x14 || current[3] != 0x02)
+        // ★ 逐字节比对：cmp dword ptr [reg+0x14], 2  ==  83 <modrm> 14 02
+        //
+        // ⚠️⚠️ ModRM 的正确解读（本项目在此处错过一次）：
+        //   0x78 = 01 111 000
+        //          mod=01（disp8！不是 disp32） reg=111(/7 = cmp) rm=000
+        //   所以 83 78 14 02 是 **4 字节**：opcode / modrm / disp8=0x14 / imm8=02。
+        //
+        //   早期版本写成 `(current[1] & 0xC0) != 0x80` —— 那是要求 mod=10（disp32），
+        //   而 0x78 & 0xC0 == 0x40，永远不成立 → 校验必然失败，
+        //   日志里就表现为「实际 83 78 14 02」但就是不放行。
+        //
+        // 正确做法：只要求 opcode==0x83 、modrm 的 reg 字段==7（group 1 /7 = cmp）、
+        // rm 字段任意（不同 gate 可能用不同寄存器），disp8==0x14、imm8==0x02。
+        if (current[0] != 0x83
+            || (current[1] & 0x38) != 0x38      // reg 字段（bits 3-5）必须为 111 = cmp
+            || (current[1] & 0xC0) != 0x40      // mod=01 -> 后面跟 disp8
+            || current[2] != 0x14               // disp8 = gridType 字段偏移
+            || current[3] != 0x02)              // imm8 = GridType.Obstacle
         {
             reason = $"不是 `cmp dword [reg+0x14], 2`（实际 {Hex(current.AsSpan(0, 4).ToArray())}）。";
             return false;
