@@ -67,12 +67,13 @@ dump_all_grids = false
 | `native_detour` | `Navigate` 内 `0x180a8d929` 的 detour，**允许穿过友方单位** | **穿不过友方** |
 | `wall_pass` | 写 `GridUnitData.passes`（§2.2c），**允许穿过己方城墙** | 穿不过己方城墙 |
 | `fix_occupancy` | `EnterGrid` Prefix + `OnLeave` Postfix，**写回被踩掉的登记** | 能穿，但**被穿的 NPC 点不动** |
+| `wall_no_stop` | `GenerateMovePath` Prefix，**城墙不可停留**（§2.2d） | **AI 会站到城墙上** |
 | `wall_pass_hook` | `Navigate` 内 `0x180a8d8b6` 的 detour | 不影响（已被 `passes` 方案覆盖） |
 | `wall_highlight_hook` | 改 `GetMoveRangeGrids` 的两处判定 | **无影响，且它开着会崩** |
 
-> ⚠️ **旧配置里的僵尸键**：`wall_ignore_team` 与 `wall_native_hooks` 均已删除，
-> 但 MelonPreferences **不会自动清理旧键**，它们会一直留在 cfg 里且无人读取。
-> 看到它们直接删掉即可。
+> ⚠️ **僵尸键**：`wall_ignore_team` 与 `wall_native_hooks` 是二分定位时期的开关，
+> 已从代码删除，cfg 里的两条也**已手工清理**（2026-10）。
+> 以后再遇到这类键直接删掉即可 —— MelonPreferences **不会自动清理已废弃的键**。
 
 ### 2.2 能力来源：「只穿友方」的原生 detour
 
@@ -261,14 +262,28 @@ stub 因此从 72 字节缩到 59 字节，且只剩两个出口。
 
 两次 `walls` 都是 0 —— **城墙自己始终不入高亮**。
 
-#### 为什么这正好满足需求
+#### 为什么这「基本」满足需求 —— 以及它漏掉的那一面
 
-需求是「**城墙不可停留，但能从上面跨过去**」。`passes` 一改，两边同时满足：
+需求是「**城墙不可停留，但能从上面跨过去**」。`passes` 一改，两边看上去同时满足：
 
-- `GetMoveRangeGrids` 里有独立的 `gridType != 2` 拦阻 → **城墙永不入高亮**
-  → 不可点、不可停留 ✅
-- `Navigate` 能把城墙当中转格 → **可跨越** ✅
+- `GetMoveRangeGrids` 里有独立的 `gridType != 2` 拦阻 → 城墙不入高亮
+  → 不可点、不可停留
+- `Navigate` 能把城墙当中转格 → **可跨越**
 
+而且「亮」与「走」由**同一个 `Navigate`** 回答，不会出现「亮了却走不过去」。
+
+> ⚠️⚠️ **但上面第一条是错的，2026-10 实机发现。**
+> `gridType != 2` 只能挡住**扩散进来的**障碍格；
+> **中心格自身会被无条件加入范围**。实测：
+>
+> | 中心格 | 范围里的障碍格数 |
+> |---|---|
+> | 普通格 `(7,13)` | **0** ✅ |
+> | 障碍格 `(6,13)` | **1 —— 它自己** ❌ |
+>
+> 后果：**AI 自动寻路站到了城墙上**（用户发现 `(6,13)` 有一名 team 1 单位）。
+> 一旦站上去，那面墙就成了它的合法落点，而且能沿着墙一格一格走下去。
+> 修复见 **§2.2d**。
 而且「亮」与「走」由**同一个 `Navigate`** 回答，不会出现「亮了却走不过去」。
 
 #### 实现：`WallPassData` + 两个 Harmony 钩子
@@ -302,6 +317,80 @@ BattleController.PrepareBattleMap
 > ⚠️ **未解风险**：`passes` 的**写入者至今未定位**，也无法确认除 `Navigate` 外
 > 还有谁读它。因此采用「进战斗置位 / 结束恢复」的可回滚策略，
 > 改动不落到存档。
+
+### 2.2d ★ 补完：城墙「不可停留」
+
+**实机问题**（用户发现）：AI 自动寻路**站到了城墙上**。
+现场：`(6,13)` 有一名 team 1 单位，该格 `gridType=Obstacle`、
+`obstacleType=Wall`、`obstacle.teamID=1`。手动点击不受影响。
+
+#### 根因：`passes` 是类别标志，一刀切
+
+`passes` 同时驱动**两件不同的事**，无法只改一半：
+
+| 作用 | 机制 |
+|---|---|
+| 「能不能**穿过**」 | `Navigate` 的搜索深度上限 = `row × passes`（§2.2c） |
+| 「能不能**停止**」 | `GetMoveRangeGrids` 的可达性判定 |
+
+把它从 `0` 改成 `15` 后，城墙从「完全不可通行」变成了「**完全可通行**」——
+既能跨过去（要的），**也能停上去**（不要的）。
+
+而且 `GetMoveRangeGrids` 的 `gridType != 2` 过滤只挡得住**扩散进来的**障碍格；
+**中心格自身永远被加入范围**（§2.2c 末尾的实测表）。所以一旦某单位站上墙，
+那面墙就成为它的合法落点，且可沿墙继续走 —— **自我延续**。
+
+#### 修法：钩 `BattleController.GenerateMovePath`（Prefix）
+
+选它的理由是它是「**玩家点击**」与「**AI 自动**」两条路径的**交汇点**，
+两者都要经它生成最终路径（见 §2.4）。挂交汇点比分别修补两条路径可靠。
+
+| 条件 | 行为 |
+|---|---|
+| 目标格 `obstale == null` | 放行（普通格） |
+| 目标格是中立障碍（`obstacleType != Wall`） | 放行 —— 原版本来就不可达，不重复干预 |
+| 目标格是**城墙** | 返回 `false` → 跳过原方法，`movePath` 不更新 |
+
+「当作非法目标，什么都不做」是刻意选择 —— **不替游戏改写意图**
+（不做「改走到墙前」这种降级），避免引入意外副作用。
+
+判据与 `WallPassData.Apply` 共用 **`WallPassData.TryGetWallTeam`**（原生指针读）：
+两处必须看**同一个字段**，否则会出现「放行了但不让停」这类不一致。
+实测：**22 面城墙被拦，12 个中立障碍 + 366 个普通格不受影响**。
+
+#### ⭐ 为什么不会造成「AI 反复选同一格」空转
+
+这是实现前最值得担心的一点（**用户提出**）：如果 AI 的候选里始终含墙格，
+拒绝岂不会让它反复选同一格而空转？
+
+实测发现一条关键**不对称性**，它正好否定了这个担心：
+
+| 中心格类型 | 范围里的障碍格数 | 含义 |
+|---|---|---|
+| **普通格** `(7,13)` | **0 个** | 从普通格出发时，城墙格**从来就不在候选里** |
+| **障碍格** `(6,13)` | **1 个（它自己）** | 只有「已经站在墙上」时它才入范围 |
+
+所以拒掉城墙落点：
+
+- **不会缩小正常候选集合** —— 正常回合（从普通格出发）它本就不在里面；
+- 只是斩断了「已在墙上 → 再走一格墙 → 仍在墙上」的**自我延续**链条。
+
+实测一个**站在墙上**的单位，其范围内仍有 **64 个普通格**可选，不会无路可走。
+
+#### 踩坑：报错里的 「postfix」 就是线索
+
+首次挂载失败，Harmony 报：
+
+```
+Return type of pass through postfix … does not match type of its first parameter
+```
+
+原因：挂载时误用了 `TryPatch`（= **postfix**）。Harmony 把
+「返回 `bool` 且首参是 `__instance`」的方法解释成了**透传 postfix**
+（postfix 的返回值会替换原返回值），而 `GenerateMovePath` 返回 `void`，类型对不上。
+
+→ **同一个签名在 prefix 下合法、在 postfix 下报错。**
+报错里的 `postfix` 二字就是线索：**改挂载方式，别去改签名**。
 
 ### 2.3 「穿越不留痕」：纯托管层的两步配合
 
@@ -343,7 +432,7 @@ BattleController.PrepareBattleMap
 
 **为什么不用旁表**（用户 m00784 提问「旁表的生命周期怎么维护？那是不是还要 hook 掉战斗开始/结束？」）：旁表要正确必须跟踪战斗开始/结束/死亡/撤销，其中好几个不在 `OnLeave`/`OnEnter` 路径上，复杂度不划算且引入失步风险。→ **改用判据完全局部的方案。**
 
-### 2.4 当前挂载的补丁（6 个 Harmony + 2 个 native detour）
+### 2.4 当前挂载的补丁（8 个 Harmony + 2 个 native detour）
 
 **Harmony：**
 ```
@@ -353,7 +442,14 @@ BattleController.BattleGridClicked     -> Prefix   （审计/点击）
 GridUnitData.OnLeave                   -> Prefix   （[命中] 计数 + [登记] 诊断）
 GridUnitData.OnLeave                   -> Postfix  （★ 穿越不留痕：写回原主）
 BattleUnit.EnterGrid                   -> Prefix   （★ 穿越不留痕：记录被覆盖的原主）
+BattleMapData.GenerateMapObjs          -> Postfix  （★ 城墙可跨越：写 passes）
+BattleController.BattleRealEnd         -> Postfix  （★ 城墙可跨越：恢复 passes）
+BattleController.GenerateMovePath      -> Prefix   （★ 城墙不可停留：拦城墙落点，§2.2d）
 ```
+
+> ⚠️ **`GenerateMovePath` 必须挂 Prefix**：写成 Postfix 会被 Harmony 当成
+> 「透传 postfix」（返回 `bool` 且首参是 `__instance`），而原方法返回 `void`，
+> 于是报 `Return type of pass through postfix …`。详见 §2.2d。
 
 **Native detour（均在 `MapNavigator.Navigate` 内）：**
 ```

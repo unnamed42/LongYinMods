@@ -544,6 +544,31 @@ Harmony 报「已挂载」只说明 `Patch()` 没抛异常。三层要分开：
 HarmonyLib.Public.Patching.PatchManager.GetPatchInfo(m).postfixes.Count()
 ```
 
+### 5.3b ⚠️ 用 `TryPatch` 挂 `bool Prefix(...)` 会报「透传 postfix」错
+
+**症状**（本项目 2026-10 真实踩到）：把一个返回 `bool`、首参是 `__instance` 的方法
+用 `_harmony.Patch(target, postfix: …)` 挂上，Harmony 报：
+
+```
+HarmonyLib.InvalidHarmonyPatchArgumentException:
+  (static bool MyMod.Plugin::X_Prefix(X __instance, GridUnitData targetGrid)):
+  Return type of pass through postfix ... does not match type of its first parameter
+```
+
+**成因**：Harmony 把「**返回 `bool` 且首参类型 = `__instance` 类型**」这个形态
+优先解释成了**透传 postfix**（pass-through postfix）—— 即「postfix 的返回值本身就是
+原方法的返回值，直接透传」。而 `GenerateMovePath` 返回 `void`，于是类型对不上。
+
+**修法**：把挂载方式改成 `TryPatchPrefix`（= `_harmony.Patch(target, prefix: …)`）。
+**同一个签名在 prefix 下完全合法，在 postfix 下必然报错。**
+
+> 💡 **报错里的 `postfix` 二字就是线索**。看到 `pass through postfix` 而你想写的明明是
+> prefix，**先查挂载方式，别去改签名** —— 改签名（比如把返回值改成 `void`）会真的
+> 失去「跳过原方法」的能力，把一个小失误变成功能性 bug。
+>
+> 这也是「同一个方法名、只差一个词」这类错误的典型：`TryPatch` / `TryPatchPrefix`
+> 长得极像，挂错了只会在运行时报这种拐弯抹角的错误。
+
 ### 5.4 `__state` 的官方语义
 
 [Harmony prefix 文档](https://harmony.pardeike.net/articles/patching-prefix.html)：
