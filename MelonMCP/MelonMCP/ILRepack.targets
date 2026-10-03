@@ -1,0 +1,12 @@
+<!--
+  Intentionally empty.
+
+  ILRepack.Lib.MSBuild.Task ships an auto-imported target that merges every *.dll in the output
+  directory. That double-merges our own output: MelonMCP.csproj already merges mcs.dll in an
+  explicit step, and the package's pass would then re-merge the result with mcs.dll again,
+  failing on every duplicated mcs type.
+
+  The package's target only runs when this file does NOT exist, so shipping it empty disables the
+  automatic behaviour while keeping our explicit merge.
+-->
+<Project />
