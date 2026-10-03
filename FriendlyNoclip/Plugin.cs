@@ -125,10 +125,19 @@ public class Plugin : MelonMod
         {
             FriendlyPassHook.Instance.Install();
         }
-
         if (WallPassEnabled.Value)
         {
             WallPassHook.Instance.Install();
+        }
+
+        // ★ 回溯探针的快照线程：任何 hook 装好后就启动。
+        //   它把 hook 的进入现场（rsp + 栈内容）持续写盘 ——
+        //   进程崩溃时内存会丢，只有落盘的那份能留下。
+        if (FriendlyPassHook.Instance.Installed || WallPassHook.Instance.Installed)
+        {
+            string probePath = System.IO.Path.Combine(
+                MelonLoader.Utils.MelonEnvironment.GameRootDirectory, "FriendlyNoclip_probe.txt");
+            NativeProbeLog.StartFlusher(probePath);
         }
 
         int patched = 0;

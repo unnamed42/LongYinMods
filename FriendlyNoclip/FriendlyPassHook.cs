@@ -127,15 +127,23 @@ internal sealed class FriendlyPassHook : NativeHookBase
         long skip = RuntimeVa(VaSkip);
         long pass = RuntimeVa(VaPass);
 
-        var stub = new List<byte>(70);
+        var stub = new List<byte>(220);
+
+        // ★ 探针：必须在任何条件判断之前 —— 这样无论走哪条分支都能记到。
+        //   只读栈 + 写环形缓冲，不改语义。hookId=1 表示穿友方。
+        NativeProbeLog.EmitRecordEntry(stub, hookId: 1);
 
         // +0  test al, al
         stub.AddRange(new byte[] { 0x84, 0xC0 });
 
         // +2  je <pass>      （al==0：无存活单位 -> 空格链，保持原行为）
-        int jeAlZero = stub.Count;
-        stub.Add(0x74);
-        stub.Add(0);
+        //
+        // ⚠️⚠️ 必须用 AddRel8：它返回的是 **rel8 操作数**的偏移。
+        //   早期版本写成 `int x = stub.Count; stub.Add(0x74); stub.Add(0);`，
+        //   于是 x 指向 **opcode**，PatchRel8 把位移写到了 0x74 上，
+        //   把 `74 16` 变成 `<disp> 16` —— 非法指令，真机直接 SIGILL。
+        //   这是本项目代价最大的手写汇编错误（崩溃在 战斗刚开始 时）。
+        AddRel8(stub, 0x74, out int jeAlZero);
 
         // +4  mov rax, [rsi+0x18]   ; g.battleUnit
         stub.AddRange(new byte[] { 0x48, 0x8B, 0x46, 0x18 });
@@ -144,9 +152,7 @@ internal sealed class FriendlyPassHook : NativeHookBase
         stub.AddRange(new byte[] { 0x48, 0x85, 0xC0 });
 
         // +11 je <skip>
-        int jeUnitNull = stub.Count;
-        stub.Add(0x74);
-        stub.Add(0);
+        AddRel8(stub, 0x74, out int jeUnitNull);
 
         // +13 mov rax, [rax+0x58]   ; battleUnit.battleTeam
         stub.AddRange(new byte[] { 0x48, 0x8B, 0x40, 0x58 });
@@ -155,9 +161,7 @@ internal sealed class FriendlyPassHook : NativeHookBase
         stub.AddRange(new byte[] { 0x48, 0x85, 0xC0 });
 
         // +20 je <skip>
-        int jeTeamNull = stub.Count;
-        stub.Add(0x74);
-        stub.Add(0);
+        AddRel8(stub, 0x74, out int jeTeamNull);
 
         // +22 mov eax, [rax+0x10]   ; battleTeam.ID
         stub.AddRange(new byte[] { 0x8B, 0x40, 0x10 });
@@ -166,9 +170,7 @@ internal sealed class FriendlyPassHook : NativeHookBase
         stub.AddRange(new byte[] { 0x3B, 0x84, 0x24, 0xD8, 0x00, 0x00, 0x00 });
 
         // +32 je <pass>           （同队 -> 放行，但**仍走空格链**）
-        int jeSameTeam = stub.Count;
-        stub.Add(0x74);
-        stub.Add(0);
+        AddRel8(stub, 0x74, out int jeSameTeam);
 
         int skipOff = stub.Count;
         EmitJumpViaR11(stub, skip);
@@ -190,6 +192,21 @@ internal sealed class FriendlyPassHook : NativeHookBase
         VerifyStub(code, passOff, skipOff, jeAlZero, jeUnitNull, jeTeamNull, jeSameTeam);
 
         return code;
+    }
+
+    /// <summary>
+    /// 发射一条 rel8 条件跳转，并返回其 **rel8 操作数**在缓冲区中的偏移。
+    ///
+    /// <para>
+    /// ⚠️ 返回值必须是**操作数**的偏移，不是 opcode 的偏移 ——
+    /// 后者会让 <see cref="PatchRel8"/> 把位移写盖到 opcode 上。
+    /// </para>
+    /// </summary>
+    private static void AddRel8(List<byte> stub, byte opcode, out int rel8Offset)
+    {
+        stub.Add(opcode);
+        rel8Offset = stub.Count;   // ← 指向下面那个占位字节，而不是 opcode
+        stub.Add(0);
     }
 
     /// <summary>把 <paramref name="rel8Offset"/> 处的 rel8 回填为跳向 <paramref name="targetOff"/>。</summary>
