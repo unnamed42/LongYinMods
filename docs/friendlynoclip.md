@@ -722,6 +722,13 @@ imul eax, [rcx + 0x20]     ; × GridUnitData.passes
 ret
 ```
 
+> ⚠️ **符号名陷阱（2026-10 实测）**：导入 Il2CppDumper 符号后，`0x1808CA250` 的名字是
+> `BattleMapData.get_GridCount` —— **这个名字是错的／至少是误导的**。它读的是 `[rcx+0x20]`
+> 与 `[rcx+0x24]`，而调用点（`0x180a8d6df`）传给它的 `rcx` 是 **`from`（一个 `GridUnitData`）**，
+> 不是 `BattleMapData`。所以实际算的是 `GridUnitData.row × GridUnitData.passes`。
+> 若照着符号名去 `BattleMapData` 里找 `GridCount` 字段，会完全找错方向。
+> **教训：符号名来自 metadata，不反映调用点的实际参数类型；必须结合调用处的寄存器内容判断。**
+
 **现场实测**：
 
 | 格子 | `gridType` | `passes` (+0x20) | `row × passes` |

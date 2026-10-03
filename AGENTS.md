@@ -95,6 +95,96 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 - 跨文件引用日志要写 **`Plugin.Log.Warning(...)`**，不能裸写 `Log`。
 - 碰原生内存需在 csproj 加 `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>`，否则 `CS0227`。
 
+### 3.5 往 mod 里内嵌第三方 DLL（ILRepack）
+
+有时需要把 MelonLoader **没提供**的库随 mod 一起发布（本项目实例：`mcs.dll` / Mono.CSharp，
+用于 REPL）。目标是**仍产出单个 DLL**，不需要用户多拷几个依赖。
+
+MelonLoader 自带的依赖（`Newtonsoft.Json` / `Iced` / `Mono.Cecil` / `Il2CppInterop.*` …）
+**不需要内嵌** —— 用 `<Private>false</Private>` 引用即可（运行时已经有）。
+
+配方（已在本项目验证，产出单 DLL）：
+
+```xml
+<!-- 1. 把 DLL 收进仓库，例如 lib/net6/mcs.dll -->
+<Reference Include="mcs">
+  <HintPath>$(LibDir)\net6\mcs.dll</HintPath>
+  <Private>true</Private>          <!-- 要拷到输出目录，ILRepack 才能看到它 -->
+</Reference>
+
+<PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.48">
+  <PrivateAssets>all</PrivateAssets>
+</PackageReference>
+```
+
+```xml
+<Target Name="MergeThirdParty" AfterTargets="Build" Condition="'$(Configuration)'=='Release'">
+  <PropertyGroup>
+    <MergedModPath>$(TargetDir)MyMod.dll</MergedModPath>
+    <PristineModPath>$(IntermediateOutputPath)MyMod.dll</PristineModPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <MergeInputs Include="$(PristineModPath)" />
+    <MergeInputs Include="$(LibDir)\net6\mcs.dll" />
+  </ItemGroup>
+  <ILRepack TargetKind="SameAsPrimaryAssembly" OutputFile="$(MergedModPath)"
+            InputAssemblies="@(MergeInputs)"
+            LibraryPath="$(TargetDir);$(LibDir)\net6;$(MelonDir);$(UnityPath)"
+            Internalize="false" Parallel="true" DebugInfo="false"
+            Union="true" AllowDuplicateResources="true"
+            AllowedDuplicateNamespaces="Mono.CompilerServices" />
+</Target>
+```
+
+**三个必踩的坑**（每一个都真耗过时间）：
+
+1. ⚠️ **必须放一个空的 `<Project>/ILRepack.targets`**。`ILRepack.Lib.MSBuild.Task` 会
+   **自动导入**一个 target，它把 `$(OutputPath)*.dll` **全部**合并。你已经有自己的合并步骤时，
+   它会把自己的产物**再合一次** → `Duplicate type ... was also present in ...`。
+   该自动 target 的条件是 `!Exists('$(ILRepackTargetsFile)')`，所以**放一个空文件即可关掉它**。
+2. ⚠️ **合并的输入必须是 `$(IntermediateOutputPath)MyMod.dll`（obj 里的原始产物），
+   不能是 `$(TargetPath)`**。读 `TargetPath` 会让增量构建把「已合并的 DLL」当成输入再合一次，
+   同样报重复类型 —— 而且**清一次 obj/bin 后会“好一次”**，极容易被误判成偶然问题。
+3. ⚠️ **`TargetKind` 用 `SameAsPrimaryAssembly`**，写 `Library` 会得到 MSB4064 警告。
+
+**参数名以实际暴露的为准** —— 猜错会报 `MSB4064: 不支持"xxx"参数`。
+本项目实测 `ILRepack.Lib.MSBuild.Task` 2.0.48 暴露的可写属性（用
+`monodis --property <task.dll>` 枚举，不要猜）：
+
+```
+AllowDuplicateResources  AllowedDuplicateNamespaces  Internalize  InternalizeExclude
+InternalizeAssembly  RenameInternalized  ExcludeInternalizeSerializable  Union
+TargetKind  OutputFile  InputAssemblies  LibraryPath  Parallel  DebugInfo
+KeyFile  DelaySign  XmlDocumentation  RepackDropAttribute  …
+```
+
+**不暴露**（写了必报 MSB4064）：`AllowedDuplicateTypes`、`UnionMerge`、`AllowZeroInputAssemblies`。
+注意正确拼写是 `AllowedDuplicateNamespaces`（Duplicate 是复数）。
+
+**验证合并成功**（不是看构建退出码）：
+
+```bash
+# 1) 第三方类型真的进去了
+monodis --typedef MyMod/bin/Release/net6.0/MyMod.dll | grep -c "Mono.CSharp"
+# 2) 它已不再是外部引用（应该没有输出）
+monodis --assemblyref MyMod/bin/Release/net6.0/MyMod.dll | grep -i mcs
+```
+
+> 补充：被内嵌的 DLL 本身可能**已经是别人的合并产物**（`mcs.dll` 就内含 MonoMod，
+> 自带一份 `Mono.CompilerServices.SymbolWriter`）。这就是 `Union="true"` +
+> `AllowedDuplicateNamespaces` 这两个参数存在的原因 —— 不能省。
+
+**NuGet 缓存重定向**：若 `~/.nuget` 或 `~/.local/share/NuGet` 在只读/受限位置，
+在仓库根放 `nuget.config`：
+
+```xml
+<configuration>
+  <config>
+    <add key="globalPackagesFolder" value=".nuget/packages" />
+    <add key="http_cache_path" value=".nuget/http-cache" />
+  </config>
+</configuration>
+```
 ---
 
 ## 4. 反编译工作流
@@ -443,6 +533,41 @@ nativeDetour.Apply();
 `#0 .DMD<Il2Cpp.X::Y> #1 .(il2cpp -> managed) Y #2 IL2CPP.il2cpp_runtime_invoke`。
 想拿 native 调用者必须走原生级手段。
 
+### 5.8 ⚠️ 空的 `[HarmonyPatch]` 会在每次启动报 ERROR
+
+**症状**（每次启动都有，不崩溃、不影响功能）：
+
+```
+[ERROR] Failed to HarmonyInit PatchAll: MyMod.SomePatch
+HarmonyLib.HarmonyException: Patching exception in method null
+ ---> System.ArgumentException: Undefined target method for patch method
+      static bool MyMod.SomePatch::Prefix(bool value)
+   at HarmonyLib.PatchClassProcessor.PatchWithAttributes(MethodBase& lastOriginal)
+```
+
+**成因**：类上写了**光秃秃的** `[HarmonyPatch]`（没带 `typeof` / 方法名），同时类里有个
+看起来像补丁的方法（`static bool Prefix(...)`）。MelonLoader 的 `MelonBase.HarmonyInit()`
+会对整个程序集跑 `PatchAll()`，它扫到这个类、也扫到了那个“像补丁”的方法，
+**但没东西可绑** → `method null` / `Undefined target method`。
+
+> ⚠️ **这不是 IL2CPP 问题** —— Mono 下同样复现。看到 `method null` 不要往 IL2CPP 方向排查。
+
+**修法**：
+
+- 若目标是在运行时反射解析、再用 `HarmonyInstance.Patch` **手动挂**的（手挂模式），
+  **删掉那个 `[HarmonyPatch]`**——它会把手挂的补丁拉进自动扫描，两者机制不兼容。
+- 若这个类**确实想**被自动挂，就必须给它具体目标：
+  `[HarmonyPatch(typeof(X), "Method")]` + 方法上标 `[HarmonyPrefix]` / `[HarmonyPostfix]`。
+
+**为什么值得修**（而非“反正是无害的”）：两种情况下都没挂上任何补丁，所以功能确实不受影响；
+但每次启动一行 ERROR 会**污染日志、掩盖真实错误**，下次排查时极可能又被当成线索查一轮。
+
+**定位手法**：
+
+```bash
+grep -rn "\[HarmonyPatch" --include=*.cs          # 类级、且没带参数的即是元凶
+monodis --customattr MyMod.dll | grep -i HarmonyPatch   # IL 层核实已清干净
+```
 ---
 
 ## 6. 原生内存操作（Proton 下可用）
@@ -547,7 +672,26 @@ IL2CPP.il2cpp_type_get_name_(IntPtr type)
 - 服务端源码在 `MelonMCP/`（本项目自建，Mono.CSharp REPL 已 ILRepack 内嵌，可执行完整 C# 语句）。
 - **核心工具**：`execute_csharp` / `evaluate_expression` / `find_objects_of_type` / `list_game_objects` / `get_type_info` / `list_types` / `list_assemblies` / `read_logs`。
 - **排查补丁用的工具**（2026-10 新增）：`hook_patch_info`（补丁挂载/触发/生效 + patcher 类型 + 入口字节）、`list_patches`（全进程补丁清单，含其他 mod）、`disasm` / `read_mem` / `resolve_jump`（**运行时**字节与跳转解析）、`watch_field` / `unwatch_field`（轮询字段变化）。
-- 还有**持久化的知识库**：`get_game_knowledge` / `add_game_knowledge`，按游戏名分类保存「同类调查结论」，下次 session 直接查。
+- **持久化的知识库**：`get_game_knowledge` / `add_game_knowledge`。
+  ⚠️ **它只用于存「游戏本身的知识」**（世界观、设定、数值规则、游戏机制这类**与 mod 开发无关**、
+  且**游戏更新也大体不变**的内容）。
+  **不要往里写开发侧的东西** —— 工具用法、构建配方、反编译流程、踩坑、地址/字段偏移、
+  调用链结论一律**不属于**它：
+  - 通用工具/构建/API 知识 → **本文件 `AGENTS.md`**
+  - 具体游戏的地址 / 字段偏移 / 调用链 / 实测行为 → **`docs/<project>.md`**
+
+  两个理由：①落盘在 `gamedir/UserData/MelonMCP/game_knowledge.json`，**在游戏目录里、不在仓库里**，
+  不随 git 同步，换机 / 校验 / 重装即丢；②别的 agent 读 `AGENTS.md` / `docs/` 时根本看不到它。
+  它只保证**跨 MCP session** 可见，**不保证跨仓库/跨机器**。
+
+**`execute_csharp` / `evaluate_expression` 的实际能力边界**（引擎为内嵌的 Mono.CSharp）：
+
+- ✅ **支持**：运算符与字符串拼接、`new` 对象构造、索引器、`foreach`、LINQ
+  （`Where`/`Select`/`OrderBy`/`ToArray`）、`string.Join`、`typeof`、泛型类型、带局部变量的多语句。
+- ✅ **会话状态跨调用保持**（变量 / using / 自定义类型）；`execute_csharp` 传 `reset=true` 清空。
+- ❌ **不支持 `return x`** —— 见下方“注意事项”表（用裸尾表达式）。
+- ⚠️ **已知问题**：**一整条超长单行表达式**（如整串 `string.Join(...Where(...Select(...)))`）
+  会**静默**返回 `Execution completed (no result)`；拆成两条语句（先赋值再拼接）即正常。
 
 ⚠️ **已禁用的工具（不要再尝试，它们会让 MCP 客户端看到一个名字却永远失败）**：
 
