@@ -8,6 +8,12 @@
     <AssemblyName>MelonMCP</AssemblyName>
     <RootNamespace>MelonMCP</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- ★ 必须显式声明 x64（理由见 FriendlyNoclip.csproj 同位置的长注释）：
+         不写就是 AnyCPU → PE 头写成 Machine=i386 + PE32。
+         MelonMCP 全是原生内存操作（VirtualQuery / Marshal.Copy /
+         StaticVaToRuntime），32 位下 Static VA 直接溢出。 -->
+    <PlatformTarget>x64</PlatformTarget>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <MelonDir>..\..\gamedir\MelonLoader\net6</MelonDir>
     <UnityPath>..\..\gamedir\MelonLoader\Il2CppAssemblies</UnityPath>

@@ -11,6 +11,19 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
+    <!-- ★ 必须显式声明 x64。不写就是 AnyCPU，Roslyn 把 PE 头写成
+         Machine=i386 + OptionalMagic=PE32。
+
+         对于**纯托管**程序集，这个字段只是提示，CLR 不据此拒绝加载 ——
+         所以它本身不造成故障。但本项目**全程是 64 位假设**：
+         StaticVaToRuntime 里的 0x180000000、一堆 IntPtr 尺寸相关的原生
+         读取，在 32 位宿主下全部溢出。AnyCPU 给了这份代码一个**假的**
+         「可移植」外观。
+         声明 x64 → 构建期就把错误暴露出来，而不是运行时才崩。
+
+         （附带：产物变成 Machine=x86-64 + PE32+，KDE Dolphin 的归类
+           也跟着正常。那是结果，不是目的。） -->
+    <PlatformTarget>x64</PlatformTarget>
     <!-- 构建指纹：嵌一个「构建时刻」进去，启动日志会打出来。
          本项目因为「跑的是旧产物」白耗过两轮，而症状是「代码不生效」——
          与真正的逻辑 bug 无法区分。有这个时间戳，一眼就能判断。
