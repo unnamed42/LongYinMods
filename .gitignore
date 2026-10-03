@@ -67,3 +67,7 @@ gamedir
 output/
 
 UnityExplorer/
+
+# Python bytecode
+__pycache__/
+*.pyc
