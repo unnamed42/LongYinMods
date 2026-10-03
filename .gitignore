@@ -64,19 +64,7 @@ gamedir
 *.log
 
 # 反编译产物（本地分析用，勿提交）
-decomp*
-cpp2il_out/
-dumper_out/
-ghidra_proj/
-
-harmony_support.cs
-interop_common.cs
-interop_dump2.cs
-melon_dump.cs
-
-AGENTS.md
-MEMORY.md
-HANDOVER.md
+output/
 
 MelonMCP/
 UnityExplorer/
