@@ -36,6 +36,12 @@
       <HintPath>$(MelonLoaderDir)\0Harmony.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <!-- Iced：x86/x64 汇编器 + 反汇编器。MelonLoader 自带（net6/Iced.dll，1.9MB），
+         运行时一定已加载，所以 <Private>False</Private> —— 不拷进输出、不需要 ILRepack。 -->
+    <Reference Include="Iced">
+      <HintPath>$(MelonLoaderDir)\Iced.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="Il2CppInterop.Runtime">
       <HintPath>$(MelonLoaderDir)\Il2CppInterop.Runtime.dll</HintPath>
       <Private>False</Private>

@@ -53,6 +53,17 @@ internal abstract class NativeHookBase
     private bool _installed;
     private bool _detached;
 
+    /// <summary>
+    /// 给 stub 预留的字节数。
+    ///
+    /// <para>
+    /// 【为什么要预留够】先分配、再构码，所以分配时并不知道码有多长。
+    /// 本项目的 stub 都在 60 字节上下（两道出口各 13 字节），256 字节余量充足。
+    /// 超出会被 <see cref="Install"/> 拒绝（不会越界写坏邻居内存）。
+    /// </para>
+    /// </summary>
+    protected virtual int AllocatedStubLength => 256;
+
     /// <summary>是否已成功安装 detour。</summary>
     internal bool Installed => _installed;
 
@@ -97,8 +108,31 @@ internal abstract class NativeHookBase
     /// </summary>
     protected abstract bool ValidateSite(byte[] current, out string reason);
 
-    /// <summary>构造本 hook 的 stub 机器码。出口地址用 <see cref="RuntimeVa"/> 换算。</summary>
-    protected abstract byte[] BuildStub();
+    /// <summary>
+    /// 构造本 hook 的 stub 机器码。
+    ///
+    /// <para>
+    /// 【为什么要把地址传进来】<paramref name="stubRip"/> 是 stub 将来<b>运行</b>的地址。
+    /// 出口跳转写成 <c>mov r11,imm64</c> 时用不到它，但写成<b>可重定位</b>的
+    /// <c>lea r11,[label]</c> 时 rel32 就要靠它来算。
+    /// </para>
+    /// <para>
+    /// 所以安装顺序必须是：<b>先 <c>AllocateExecutable</c> → 再 <c>BuildStub(rip)</c> → 再拷贝</b>。
+    /// 早期版本先构码再分配，那时 stub 还不知道自己会落在哪里
+    /// —— 这在「所有出口都是绝对地址」时恰好能用，但本质上是个隐患。
+    /// </para>
+    /// </summary>
+    protected abstract byte[] BuildStub(long stubRip);
+
+    /// <summary>
+    /// 出口目标的预期地址（名字 -> 运行时地址）。安装后会自动核对，不一致就报 ERROR。
+    /// 返回 null 表示「本 hook 不登记该名字」。默认没有。
+    /// </summary>
+    protected virtual IReadOnlyDictionary<string, long> ExpectedExits => EmptyExits;
+
+    private static readonly IReadOnlyDictionary<string, long> EmptyExits =
+        new Dictionary<string, long>();
+
 
     // ---- 骨架 ----
 
@@ -158,15 +192,45 @@ internal abstract class NativeHookBase
             //
             // 保留能力：子类若确实想核对固定字节，可在自己的 ValidateSite 里做。
 
-            byte[] code = BuildStub();
-
-            _stub = NativeMemory.AllocateExecutable(code.Length);
+            // ★ 顺序有讲究：**先分配地址，再构码**。
+            //
+            // 出口如果用可重定位形态（lea r11,[label]），rel32 必须知道
+            // stub 自己会落在哪里 —— 所以 BuildStub 需要拿到 rip。
+            // 早期版本先构码再分配，那时 stub 还不知道自己的地址，
+            // 只能用绝对地址出口（恰好能用，但本质上是个隐患）。
+            //
+            // 先分配再构码后，二者都能用；而宽裕预留也让
+            // 「构建出来的码比预估长」不会变成踩坏邻居内存。
+            _stub = NativeMemory.AllocateExecutable(AllocatedStubLength);
 
             if (_stub == IntPtr.Zero)
             {
                 Plugin.Log.Warning($"{Tag} 分配可执行内存失败，跳过。");
                 return false;
             }
+
+            byte[] code = BuildStub(_stub.ToInt64());
+
+            if (code.Length == 0)
+            {
+                Plugin.Log.Warning($"{Tag} stub 构码失败（汇编器未产出机器码），拒绝安装。");
+                return false;
+            }
+
+            if (code.Length > AllocatedStubLength)
+            {
+                Plugin.Log.Warning(
+                    $"{Tag} stub 码长 {code.Length} 超过预留的 {AllocatedStubLength} 字节，拒绝安装。");
+                return false;
+            }
+
+            // 【为什么要核验出口】这一步是汇编器带来的**免费自检**：
+            //
+            // 手写时代，出口是否正确只能靠人肉核对 rel8 数值 —— 算错不会报错，
+            // 只会变成玄学现象（本项目两次：格子不亮 / AI 站到玩家头上）。
+            // 现在标签的最终地址由汇编器算，我们只需把它与「静态 VA 换算出的
+            // 运行时目标」比一下：不等就说明 stub 里某条跳转指向了别处。
+            VerifyExits(code);
 
             Marshal.Copy(code, 0, _stub, code.Length);
 
@@ -244,48 +308,111 @@ internal abstract class NativeHookBase
     }
 
     /// <summary>
-    /// 发射 <c>mov rax, imm64</c> + <c>jmp rax</c>（12 字节，绝对跳转）。
+    /// 安装后核对 stub 里每条出口跳转的实际目标。
     ///
     /// <para>
-    /// ⚠️ <b>会覆盖 rax</b>。仅当目标处**不依赖 rax 原值**时可用。
+    /// 【为什么值得做】本项目在出口上错过<b>两次</b>，而两次都<b>不报错</b>：
+    /// 一次是格子不亮，一次是 AI 站到玩家头上（跳过了 <c>AroundGridHaveEnemy</c>）。
+    /// 共同点是「跳转确实执行了，只是落到了别处」—— 手写汇编时代这只能靠人肉核对。
     /// </para>
-    ///
     /// <para>
-    /// 🚫 <b>本项目现在不再使用它</b>：两个 hook 的出口都已改为「原版代码的落点」
-    /// （<c>0x180a8d8bc</c> / <c>0x180a8d92f</c> / <c>0x180a8da6b</c>），
-    /// 而原版代码**必须**保留 <c>rax</c>。新写 stub 请一律用 <see cref="EmitJumpViaR11"/>。
-    /// 保留此方法仅为将来「跳到自己的跳转目标」时使用。
+    /// 现在出口地址由汇编器算，于是可以拿它与「静态 VA 换算出的运行时目标」对账。
+    /// 不一致就报 ERROR，把「玄学现象」提前成「安装日志里的一行」。
+    /// </para>
+    /// <para>
+    /// 只报错、不拒绝安装：出口对不上时功能一定不对，但<b>直接摘掉 hook 会让整个特性失效</b>，
+    /// 用户反而看不到问题。保留安装 + 大字号 ERROR 更利于定位。
     /// </para>
     /// </summary>
-    protected static void EmitAbsoluteJump(List<byte> buffer, long target)
+    private void VerifyExits(byte[] code)
     {
-        buffer.AddRange(new byte[] { 0x48, 0xB8 });      // mov rax, imm64
-        buffer.AddRange(BitConverter.GetBytes(target));
-        buffer.AddRange(new byte[] { 0xFF, 0xE0 });      // jmp rax
+        if (_stub == IntPtr.Zero || ExpectedExits.Count == 0)
+        {
+            return;
+        }
+
+        // 出口形态固定为 `mov r11, imm64` (49 BB + 8 字节) —— 立即数就是目标地址。
+        // 逐个扫出来，与子类声明的预期集合比对：既查「值对不对」，也查「数量对不对」。
+        var found = new List<(int At, long Target)>();
+
+        for (int i = 0; i + 9 < code.Length; i++)
+        {
+            if (code[i] == 0x49 && code[i + 1] == 0xBB)
+            {
+                found.Add((i, BitConverter.ToInt64(code, i + 2)));
+            }
+        }
+
+        if (found.Count == 0)
+        {
+            Plugin.Log.Error(
+                $"{Tag} stub 里**一条出口跳转都没找到**（码长 {code.Length}）。功能必然不生效，请检查 BuildStub。");
+            return;
+        }
+
+        foreach ((int at, long target) in found)
+        {
+            if (!IsExpectedExit(target))
+            {
+                Plugin.Log.Error(
+                    $"{Tag} stub 自检失败：+{at:x2} 处的出口指向 0x{target:x}，" +
+                    $"不在声明的出口集合里（{DescribeExpectedExits()}）。跳转会落到错误位置。");
+            }
+        }
+
+        foreach (var kv in ExpectedExits)
+        {
+            bool hit = false;
+
+            foreach ((int _, long target) in found)
+            {
+                if (target == kv.Value)
+                {
+                    hit = true;
+                    break;
+                }
+            }
+
+            if (!hit)
+            {
+                Plugin.Log.Error(
+                    $"{Tag} stub 自检失败：声明的出口 {kv.Key}=0x{kv.Value:x} 在 stub 里**没有出现**。");
+            }
+        }
+    }
+
+    private bool IsExpectedExit(long target)
+    {
+        foreach (var kv in ExpectedExits)
+        {
+            if (kv.Value == target)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private string DescribeExpectedExits()
+    {
+        var parts = new List<string>();
+
+        foreach (var kv in ExpectedExits)
+        {
+            parts.Add($"{kv.Key}=0x{kv.Value:x}");
+        }
+
+        return string.Join(" ", parts);
     }
 
     /// <summary>
-    /// 发射 <c>mov r11, imm64</c> + <c>jmp r11</c>（12 字节，绝对跳转），
-    /// **不破坏 rax**。
-    ///
-    /// <para>
-    /// 【为什么需要它】本项目在此处真实崩过：用 rax 中转跳到 <c>0x180a8d8bc</c> 后，
-    /// 该处第一条指令是 <c>mov r9,[rax]</c> —— 它期望 <c>rax</c> 还是上一条 <c>cmp</c>
-    /// 留下的邻格指针，但 <c>mov rax,imm64</c> 已把它改成了代码地址，
-    /// 于是把代码字节当类指针解引用 → SIGSEGV（gdb 现场：<c>rip=0x180a8d8ca</c>，
-    /// <c>rax=0x180a8d8bc</c>）。
-    /// </para>
-    ///
-    /// <para>
-    /// <c>r11</c> 是 Win64 的易失寄存器，本 mod 的跳转目标
-    /// （<c>0x180a8d8bc</c> / <c>0x180a8d92f</c> / <c>0x180a8da6b</c>）后续代码均不读它
-    /// （已逐条核实）。
+    /// 把 stub 的机器码反汇编后打进日志（诊断用）。
     /// </summary>
-    protected static void EmitJumpViaR11(List<byte> buffer, long target)
+    protected void LogStubDisassembly(byte[] code)
     {
-        buffer.AddRange(new byte[] { 0x49, 0xBB });      // mov r11, imm64
-        buffer.AddRange(BitConverter.GetBytes(target));
-        buffer.AddRange(new byte[] { 0x41, 0xFF, 0xE3 }); // jmp r11
+        Plugin.Log.Msg($"{Tag} stub（{code.Length} 字节）@0x{_stub.ToInt64():x}：\n" +
+                       StubAssembler.Describe(code, _stub.ToInt64()));
     }
 
     /// <summary>
@@ -301,24 +428,6 @@ internal abstract class NativeHookBase
     {
         // 0F 80..0F 8F = jcc rel32
         return bytes.Length >= 2 && bytes[0] == 0x0F && bytes[1] >= 0x80 && bytes[1] <= 0x8F;
-    }
-
-    protected static bool BytesEqual(byte[] a, byte[] b)
-    {
-        if (a.Length != b.Length)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < a.Length; i++)
-        {
-            if (a[i] != b[i])
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     protected static string Hex(byte[] bytes)

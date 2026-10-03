@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Iced.Intel;
+using static Iced.Intel.AssemblerRegisters;
 
 namespace Unnamed42.FriendlyNoclip;
 
@@ -78,6 +80,38 @@ internal sealed class FriendlyPassHook : NativeHookBase
 
     protected override byte[] OriginalBytes => OriginalBytes_;
 
+    /// <summary>
+    /// 两个出口的预期运行时地址。安装后由 <c>NativeHookBase.VerifyExits</c> 对账。
+    ///
+    /// <para>
+    /// 这就是「手写汇编时代只能靠人肉核对」的那件事 —— 现在：
+    /// 标签地址由汇编器算，我们只声明「应该跳到哪」，不匹配就报 ERROR。
+    /// </para>
+    /// </summary>
+    protected override IReadOnlyDictionary<string, long> ExpectedExits => ExitExpectations;
+
+    /// <summary>
+    /// ⚠️ 必须是**属性**，不能是 <c>static readonly</c> 字段。
+    ///
+    /// <para>
+    /// 静态字段初始化发生在「首次触碰该类型」时 —— 那可能早于
+    /// <see cref="NativeMemory.ResolveModule"/>（模块基址是在 <c>OnInitializeMelon</c> 里才解析的）。
+    /// 此时 <c>RuntimeVa</c> 返回 <b>0</b>，于是自检会报
+    /// 「出口指向 0x…，不在声明的出口集合里（pass=0x0 skip=0x0）」——
+    /// 一条**纯粹由初始化顺序造成的假警报**。
+    /// </para>
+    /// <para>
+    /// 本项目第一次跑就撞上了这个（活进程日志，2026-10）：自检本身工作正常，
+    /// 错的是「什么时候算这个值」。改成属性后每次读取都重新换算，问题消失。
+    /// </para>
+    /// </summary>
+    private static IReadOnlyDictionary<string, long> ExitExpectations =>
+        new Dictionary<string, long>
+        {
+            ["pass"] = RuntimeVa(VaPass),
+            ["skip"] = RuntimeVa(VaSkip),
+        };
+
     protected override bool ValidateSite(byte[] current, out string reason)
     {
         // 只要求它仍是一条 6 字节 rel32 jcc（`jne`，或已被改过位移的 `jne`）。
@@ -93,7 +127,7 @@ internal sealed class FriendlyPassHook : NativeHookBase
     }
 
     /// <summary>
-    /// 构造 detour stub。
+    /// 构造 detour stub —— <b>用 Iced 汇编器，不再手写机器码</b>。
     ///
     /// <para>入口状态（已逐条反汇编确认）：</para>
     /// <list type="bullet">
@@ -102,169 +136,62 @@ internal sealed class FriendlyPassHook : NativeHookBase
     ///   <item><c>[rsp+0xd8]</c> = <c>selfTeamID</c>（相对 <c>Navigate</c> 的栈帧）</item>
     /// </list>
     /// <para>
-    /// 关键：Dobby 是**跳**到 stub（不是 <c>call</c>），所以 <c>rsp</c> 不变，
+    /// 关键：Dobby 是<b>跳</b>到 stub（不是 <c>call</c>），所以 <c>rsp</c> 不变，
     /// <c>[rsp+0xd8]</c> 仍是 <c>selfTeamID</c>。
     /// </para>
     ///
     /// <para>
     /// <b>★★ 只有两个出口，而且「队友格」与「空格」合流：</b>
     /// 本 hook 的职责边界是「把阻挡判据从『有存活单位』改成『有敌方单位』」，
-    /// **不碰**「落点合不合法」。所以只要不是敌方，就一律送回
+    /// <b>不碰</b>「落点合不合法」。所以只要不是敌方，就一律送回
     /// <c>0x180a8d92f</c>（空格链，会跑 <c>AroundGridHaveEnemy</c>），
     /// 而不是直接接受。
     /// </para>
     ///
     /// <para>
-    /// 两个出口都用 <c>mov r11,imm64; jmp r11</c> 的绝对跳转，
+    /// 出口用 <see cref="StubAssembler.ExitViaImm64"/>（<c>mov r11,imm64; jmp r11</c>），
     /// 不依赖 stub 与目标之间的 rel32 距离。
     /// （不用 <c>rax</c>：<c>0x180a8d92f</c> 之后的原代码可能依赖上一条指令在
     /// <c>rax</c> 里留下的值 —— 本项目在 <see cref="WallPassHook"/> 上踩过这个坑。）
     /// </para>
     /// </summary>
-    /// </summary>
-    protected override byte[] BuildStub()
+    protected override byte[] BuildStub(long stubRip)
     {
-        long skip = RuntimeVa(VaSkip);
-        long pass = RuntimeVa(VaPass);
+        return StubAssembler.Build(Tag, 64, stubRip, asm =>
+        {
+            Label exitSkip = asm.CreateLabel("skip");
+            Label exitPass = asm.CreateLabel("pass");
 
-        var stub = new List<byte>(70);
+            // al == 0（无存活单位）→ 空格链，保持原行为。
+            asm.test(al, al);
+            asm.je(exitPass);
 
-        // +0  test al, al
-        stub.AddRange(new byte[] { 0x84, 0xC0 });
+            asm.mov(rax, __qword_ptr[rsi + 0x18]);        // g.battleUnit
+            asm.test(rax, rax);
+            asm.jz(exitSkip);
 
-        // +2  je <pass>      （al==0：无存活单位 -> 空格链，保持原行为）
-        //
-        // ⚠️⚠️ 必须用 AddRel8：它返回的是 **rel8 操作数**的偏移。
-        //   早期版本写成 `int x = stub.Count; stub.Add(0x74); stub.Add(0);`，
-        //   于是 x 指向 **opcode**，PatchRel8 把位移写到了 0x74 上，
-        //   把 `74 16` 变成 `<disp> 16` —— 非法指令，真机直接 SIGILL。
-        //   这是本项目代价最大的手写汇编错误（崩溃在 战斗刚开始 时）。
-        AddRel8(stub, 0x74, out int jeAlZero);
+            asm.mov(rax, __qword_ptr[rax + 0x58]);        // battleUnit.battleTeam
+            asm.test(rax, rax);
+            asm.jz(exitSkip);
 
-        // +4  mov rax, [rsi+0x18]   ; g.battleUnit
-        stub.AddRange(new byte[] { 0x48, 0x8B, 0x46, 0x18 });
+            asm.mov(eax, __dword_ptr[rax + 0x10]);        // battleTeam.ID
+            asm.cmp(eax, __dword_ptr[rsp + SelfTeamIdStackOffset]);
+            asm.je(exitPass);                             // 同队 -> pass（走空格链，不可直接接受）
 
-        // +8  test rax, rax
-        stub.AddRange(new byte[] { 0x48, 0x85, 0xC0 });
+            // ---- 两个出口 ----
+            // ⚠️ exitPass 必须与 exitSkip 分列两条指令，不能绑在同一位置
+            //    （Iced：At most one label per instruction is allowed）。
+            asm.Label(ref exitSkip);
+            asm.ExitViaImm64(RuntimeVa(VaSkip));
 
-        // +11 je <skip>
-        AddRel8(stub, 0x74, out int jeUnitNull);
-
-        // +13 mov rax, [rax+0x58]   ; battleUnit.battleTeam
-        stub.AddRange(new byte[] { 0x48, 0x8B, 0x40, 0x58 });
-
-        // +17 test rax, rax
-        stub.AddRange(new byte[] { 0x48, 0x85, 0xC0 });
-
-        // +20 je <skip>
-        AddRel8(stub, 0x74, out int jeTeamNull);
-
-        // +22 mov eax, [rax+0x10]   ; battleTeam.ID
-        stub.AddRange(new byte[] { 0x8B, 0x40, 0x10 });
-
-        // +25 cmp eax, [rsp+0xd8]   ; selfTeamID
-        stub.AddRange(new byte[] { 0x3B, 0x84, 0x24, 0xD8, 0x00, 0x00, 0x00 });
-
-        // +32 je <pass>           （同队 -> 放行，但**仍走空格链**）
-        AddRel8(stub, 0x74, out int jeSameTeam);
-
-        int skipOff = stub.Count;
-        EmitJumpViaR11(stub, skip);
-
-        int passOff = stub.Count;
-        EmitJumpViaR11(stub, pass);
-
-        // 回填 rel8（相对**下一条指令**的位移：下一条指令 = rel8 偏移 + 1）。
-        //
-        // ⚠️ 这里**不再写死 code[3]/[12]/[21]/[33]** —— 那是本项目的已知坑：
-        //    指令布局一变，写死的下标就会静默错位，跳转落到垃圾地址。
-        //    改为从**发射时的实际位置**回填，并在下面自检（同 WallPassHook）。
-        byte[] code = stub.ToArray();
-        PatchRel8(code, jeAlZero, passOff);
-        PatchRel8(code, jeUnitNull, skipOff);
-        PatchRel8(code, jeTeamNull, skipOff);
-        PatchRel8(code, jeSameTeam, passOff);
-
-        VerifyStub(code, passOff, skipOff, jeAlZero, jeUnitNull, jeTeamNull, jeSameTeam);
-
-        return code;
+            asm.Label(ref exitPass);
+            asm.ExitViaImm64(RuntimeVa(VaPass));
+        });
     }
 
     /// <summary>
-    /// 发射一条 rel8 条件跳转，并返回其 **rel8 操作数**在缓冲区中的偏移。
-    ///
-    /// <para>
-    /// ⚠️ 返回值必须是**操作数**的偏移，不是 opcode 的偏移 ——
-    /// 后者会让 <see cref="PatchRel8"/> 把位移写盖到 opcode 上。
-    /// </para>
+    /// <c>selfTeamID</c> 相对 <c>Navigate</c> 栈帧的偏移（即 <c>[rsp+0xd8]</c>）。
+    /// Dobby 是<b>跳</b>进 stub，<c>rsp</c> 完全不变，故该偏移在 stub 内直接可用。
     /// </summary>
-    private static void AddRel8(List<byte> stub, byte opcode, out int rel8Offset)
-    {
-        stub.Add(opcode);
-        rel8Offset = stub.Count;   // ← 指向下面那个占位字节，而不是 opcode
-        stub.Add(0);
-    }
-
-    /// <summary>把 <paramref name="rel8Offset"/> 处的 rel8 回填为跳向 <paramref name="targetOff"/>。</summary>
-    private static void PatchRel8(byte[] code, int rel8Offset, int targetOff)
-    {
-        // rel8 相对**下一条指令**：下一条指令地址 = rel8Offset + 1
-        code[rel8Offset] = (byte)(targetOff - (rel8Offset + 1));
-    }
-
-    /// <summary>
-    /// 自检：反查每条条件跳转的目的地是否与预期出口一致。
-    ///
-    /// <para>
-    /// 本项目在此处真实踩过坑 —— 跳转出口算错时不会报错，只会表现为
-    /// 「AI 能站到玩家格子上」这种看上去毫不相关的行为异常。
-    /// 有这个自检，算错偏移会在安装瞬间就去日志报警。
-    /// </para>
-    ///
-    /// <para>
-    /// ❗ 特别注意 <paramref name="jeSameTeam"/> 必须指向 <paramref name="passOff"/>（**不能**是
-    /// 「直接接受」），否则会跳过 <c>AroundGridHaveEnemy</c>，
-    /// 重现「AI 站到玩家头上」的 bug。
-    /// </para>
-    /// </summary>
-    private void VerifyStub(
-        byte[] code, int passOff, int skipOff,
-        int jeAlZero, int jeUnitNull, int jeTeamNull, int jeSameTeam)
-    {
-        var checks = new System.Collections.Generic.List<(int at, int expect, string name)>
-        {
-            (jeAlZero, passOff, "无存活单位 -> pass（空格链）"),
-            (jeUnitNull, skipOff, "battleUnit == null -> skip"),
-            (jeTeamNull, skipOff, "battleTeam == null -> skip"),
-            (jeSameTeam, passOff, "同队 -> pass（空格链，不可直接接受）"),
-        };
-
-        foreach (var (at, expect, name) in checks)
-        {
-            if (at < 0 || at >= code.Length)
-            {
-                Plugin.Log.Error($"{Tag} stub 自检失败：{name} 的 rel8 偏移 {at} 越界（长度 {code.Length}）。");
-                continue;
-            }
-
-            int dest = at + 1 + (sbyte)code[at];
-
-            if (dest != expect)
-            {
-                Plugin.Log.Error(
-                    $"{Tag} stub 自检失败：{name} 的跳转目标算出 +{dest:x}，期望 +{expect:x}。" +
-                    "寻路判定会错乱（典型症状：AI 能站到玩家格子上），请检查 BuildStub 的指令布局。");
-            }
-        }
-
-        if (passOff == skipOff)
-        {
-            Plugin.Log.Error($"{Tag} stub 自检失败：出口重叠（pass={passOff} skip={skipOff}）。");
-        }
-
-        if (passOff >= code.Length || skipOff >= code.Length)
-        {
-            Plugin.Log.Error($"{Tag} stub 自检失败：出口越界（pass={passOff} skip={skipOff} 长度={code.Length}）。");
-        }
-    }
+    private const int SelfTeamIdStackOffset = 0xD8;
 }

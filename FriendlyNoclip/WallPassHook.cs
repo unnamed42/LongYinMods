@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Iced.Intel;
+using static Iced.Intel.AssemblerRegisters;
 
 namespace Unnamed42.FriendlyNoclip;
 
@@ -103,6 +105,20 @@ internal sealed class WallPassHook : NativeHookBase
     /// <summary><c>ObstacleType.Wall</c> —— 枚举实测为 <c>Normal=0, Wall=1</c>。</summary>
     private const int ObstacleTypeWall = 1;
 
+    /// <summary>
+    /// <c>selfTeamID</c> 相对 <c>Navigate</c> 栈帧的偏移（即 <c>[rsp+0xd8]</c>）。
+    ///
+    /// <para>
+    /// Dobby 是<b>跳</b>到 stub（不是 <c>call</c>）——<b><c>rsp</c> 完全不变</b>，
+    /// 所以这个偏移在 stub 内直接可用，不需要调整任何帧指针。
+    /// </para>
+    /// <para>
+    /// ⚠️ 它属于「游戏一更新就失效」的那类常量。改这里之前先重新反汇编
+    /// <c>Navigate</c> 确认 <c>selfTeamID</c> 仍在同一栈槽。
+    /// </para>
+    /// </summary>
+    private const int SelfTeamIdStackOffset = 0xD8;
+
     private static readonly byte[] OriginalBytes_ = { 0x0F, 0x84, 0xAF, 0x01, 0x00, 0x00 };
 
     /// <summary>单例：本 hook 全进程只会挂一次。</summary>
@@ -117,6 +133,38 @@ internal sealed class WallPassHook : NativeHookBase
     protected override ulong HookVa => VaHookSite;
 
     protected override byte[] OriginalBytes => OriginalBytes_;
+
+    /// <summary>
+    /// 两个出口的预期运行时地址。安装后由 <c>NativeHookBase.VerifyExits</c> 对账。
+    ///
+    /// <para>
+    /// 这就是「手写汇编时代只能靠人肉核对」的那件事 —— 现在：
+    /// 标签地址由汇编器算，我们只声明「应该跳到哪」，不匹配就报 ERROR。
+    /// </para>
+    /// </summary>
+    protected override IReadOnlyDictionary<string, long> ExpectedExits => ExitExpectations;
+
+    /// <summary>
+    /// ⚠️ 必须是**属性**，不能是 <c>static readonly</c> 字段。
+    ///
+    /// <para>
+    /// 静态字段初始化发生在「首次触碰该类型」时 —— 那可能早于
+    /// <see cref="NativeMemory.ResolveModule"/>（模块基址是在 <c>OnInitializeMelon</c> 里才解析的）。
+    /// 此时 <c>RuntimeVa</c> 返回 <b>0</b>，于是自检会报
+    /// 「出口指向 0x…，不在声明的出口集合里（pass=0x0 skip=0x0）」——
+    /// 一条**纯粹由初始化顺序造成的假警报**。
+    /// </para>
+    /// <para>
+    /// 本项目第一次跑就撞上了这个（活进程日志，2026-10）：自检本身工作正常，
+    /// 错的是「什么时候算这个值」。改成属性后每次读取都重新换算，问题消失。
+    /// </para>
+    /// </summary>
+    private static IReadOnlyDictionary<string, long> ExitExpectations =>
+        new Dictionary<string, long>
+        {
+            ["pass"] = RuntimeVa(VaPass),
+            ["skip"] = RuntimeVa(VaSkip),
+        };
 
     protected override bool ValidateSite(byte[] current, out string reason)
     {
@@ -133,169 +181,78 @@ internal sealed class WallPassHook : NativeHookBase
     }
 
     /// <summary>
-    /// 构造 detour stub。
+    /// 构造 detour stub —— <b>用 Iced 汇编器，不再手写机器码</b>。
     ///
-    /// <para>入口状态（Dobby 是**跳**进来，<c>rsp</c> 不变，所以 <c>[rsp+0xd8]</c> 有效）：</para>
+    /// <para><b>入口状态</b>（Dobby 是<b>跳</b>进来，<c>rsp</c> 不变，所以 <c>[rsp+0xd8]</c> 有效）：</para>
     /// <list type="bullet">
     ///   <item><c>rax</c> = 邻格 <c>g</c>（<c>GridUnitData*</c>）—— 上一条 <c>cmp</c> 刚读过它</item>
     ///   <item><c>[rax+0x14]</c> 已确认 == 2（<c>gridType == Obstacle</c>）</item>
     ///   <item><c>[rsp+0xd8]</c> = <c>selfTeamID</c></item>
     /// </list>
     ///
-    /// <para>只读 <c>rax</c> 与栈，**不依赖 <c>rsi</c>**（虽然 <c>rsi</c> 此刻也等于 <c>g</c>，
+    /// <para>只读 <c>rax</c> 与栈，<b>不依赖 <c>rsi</c></b>（虽然 <c>rsi</c> 此刻也等于 <c>g</c>，
     /// 但用 <c>rax</c> 更贴近这条指令的原始语义）。</para>
-    /// </summary>
-    protected override byte[] BuildStub()
-    {
-        long skip = RuntimeVa(VaSkip);
-        long pass = RuntimeVa(VaPass);
-
-        var stub = new List<byte>(72);
-
-        // ★★ 关键：hook 点在 `je` 上，**两种情况都会执行到**：
-        //   ① g.gridType == Obstacle  → 原本会跳（障碍格被排除）
-        //   ② g.gridType != Obstacle  → 原本不跳，落到 0x180a8d8bc 继续
-        //   所以 stub **必须自己再判一次 gridType**。
-        //
-        //   ⚠️ 初期漏了 ② 分支，把所有普通格也跳去 skip ——
-        //      后果是移动范围只剩脚下那一格（实机复现）。这是本类 bug 的根源，
-        //      所以下面所有 rel8 偏移都从**实际发射位置**回读校验，不再手算。
-        //
-        // rax = 邻格 g（上一条 cmp 刚读过）；rcx/rdx 为易失寄存器，可自由使用。
-
-        // +0x00  cmp dword [rax+0x14], 2   ; g.gridType == Obstacle ?
-        stub.AddRange(new byte[] { 0x83, 0x78, (byte)OffGridType, (byte)GridTypeObstacle });
-
-        // +0x04  jne <pass>               ; 非障碍格 -> 原样继续（不可省略！）
-        AddRel8(stub, 0x75, out int jNotObstacle);
-        // ---- 以下只在「障碍格」时执行 ----
-
-        // +0x06  mov rcx, [rax+0x30]       ; g.obstale
-        stub.AddRange(new byte[] { 0x48, 0x8B, 0x48, (byte)OffObstale });
-
-        // +0x0a  test rcx, rcx
-        stub.AddRange(new byte[] { 0x48, 0x85, 0xC9 });
-
-        // +0x0d  jz <skip>                 ; 无障碍物数据 -> 保持原行为
-        AddRel8(stub, 0x74, out int jNoObstale);
-
-        // +0x0f  cmp dword [rcx+0x10], 1   ; obstalceType == Wall ?
-        stub.AddRange(new byte[] { 0x83, 0x79, (byte)OffObstacleType, (byte)ObstacleTypeWall });
-
-        // +0x13  jne <skip>                ; 普通障碍（造景/木桶…）-> 保持原行为
-        AddRel8(stub, 0x75, out int jNotWall);
-
-        // +0x15  mov edx, [rcx+0x2c]       ; obstale.teamID
-        stub.AddRange(new byte[] { 0x8B, 0x51, (byte)OffObstacleTeam });
-
-        // +0x18  cmp edx, [rsp+0xd8]       ; == selfTeamID ?
-        // +0x1f  jne <skip>                ; 他方城墙 -> 保持原行为
-        stub.AddRange(new byte[] { 0x3B, 0x94, 0x24, 0xD8, 0x00, 0x00, 0x00 });
-        AddRel8(stub, 0x75, out int jOtherTeam);
-
-        // ---- 两个出口 ----
-        //
-        // ⚠️⚠️ 出口跳转**不能用 rax 做中转**（已踩坑，gdb 现场：
-        //     rax=0x180a8d8bc 跳到该处后 `mov r9,[rax]` 读到代码字节当类指针，
-        //     再 `[r9+0x140]` 即 SIGSEGV）。
-        //
-        //   原因：`pass`（0x180a8d8bc）是紧跟 `cmp` 的**原始代码**，
-        //   它**依赖 `cmp` 留下的 rax = 邻格 g**。
-        //   而 `mov rax,imm64; jmp rax` 会把 rax 改成代码地址。
-        //
-        //   两个出口后续代码均不读 r11（已核实），所以统一用 r11 中转：
-        //     r11 是 Win64 易失寄存器。
-        //
-        // ⚠️ pass 必须紧跟检查：三条全不跳时**顺序落入** pass。
-        int passOff = stub.Count;
-        EmitJumpViaR11(stub, pass);
-
-        int skipOff = stub.Count;
-        EmitJumpViaR11(stub, skip);
-        byte[] code = stub.ToArray();
-
-        // 回填 rel8（相对**下一条指令**）。
-        // 这里不再写死 code[5]/[14]… 而是从发射时记下的偏移直接定位，
-        // 并在下方做一次自检，避免再次出现「偏移与实际布局脱节」。
-        PatchRel8(code, jNotObstacle, passOff);
-        PatchRel8(code, jNoObstale, skipOff);
-        PatchRel8(code, jNotWall, skipOff);
-        PatchRel8(code, jOtherTeam, skipOff);
-
-        VerifyStub(code, passOff, skipOff, jNotObstacle, jNoObstale, jNotWall, jOtherTeam);
-
-        return code;
-    }
-
-    /// <summary>发射一条 rel8 条件跳转，并返回其 rel8 操作数在缓冲区中的偏移。</summary>
-    private static void AddRel8(List<byte> stub, byte opcode, out int rel8Offset)
-    {
-        stub.Add(opcode);
-        rel8Offset = stub.Count;
-        stub.Add(0);   // 占位，稍后回填
-    }
-
-    /// <summary>把 offset 处的 rel8 回填为跳向 <paramref name="targetOff"/>。</summary>
-    private static void PatchRel8(byte[] code, int rel8Offset, int targetOff)
-    {
-        // rel8 是相对**下一条指令**的位移：下一条指令地址 = rel8Offset + 1
-        code[rel8Offset] = (byte)(targetOff - (rel8Offset + 1));
-    }
-
-    /// <summary>
-    /// 自检：反查每条条件跳转的目的地是否与预期出口一致。
     ///
     /// <para>
-    /// 加这一步是因为本项目在此处真实踩过坑 —— 漏掉「非障碍格原样继续」分支时，
-    /// 普通格全被跳过，表现为「移动范围只剩脚下那一格」，而静态看代码很难发现。
-    /// 有这个自检，算错偏移会在安装时就去日志报警，而不是变成玄学现象。
-    /// </para>
-    ///
-    /// <para>
-    /// 这里**不写死偏移**，而是把 <see cref="BuildStub"/> 里记下的 rel8 操作数偏移
-    /// 原样传进来。以前那版把偏移写死为 5/14/20/32，一旦指令布局变动就会
-    /// 「自检报的错”与“实际错”脱节」，反而误导排查。
+    /// 【两级退出】<c>exitSkip</c> = 保持「障碍不可通行」的原行为；
+    /// <c>exitPass</c> = 送回原 <c>je</c> 不跳时的落点，由游戏自己裁决。
+    /// 出口用 <see cref="StubAssembler.ExitViaImm64"/>（<c>mov r11,imm64; jmp r11</c>）：
+    /// <c>r11</c> 是 Win64 易失寄存器，两个出口后续代码均不读它（已逐条核实）。
     /// </para>
     /// </summary>
-    private void VerifyStub(
-        byte[] code, int passOff, int skipOff,
-        int jNotObstacle, int jNoObstale, int jNotWall, int jOtherTeam)
+    protected override byte[] BuildStub(long stubRip)
     {
-        var checks = new System.Collections.Generic.List<(int at, int expect, string name)>
+        return StubAssembler.Build(Tag, 64, stubRip, asm =>
         {
-            (jNotObstacle, passOff, "非障碍格 -> 原样继续（pass）"),
-            (jNoObstale, skipOff, "obstale == null -> skip"),
-            (jNotWall, skipOff, "非城墙 -> skip"),
-            (jOtherTeam, skipOff, "他方城墙 -> skip"),
-        };
+            // 两个出口（见下方注释）；在 emit 返回前必须全部绑定。
+            Label exitSkip = asm.CreateLabel("skip");
+            Label exitPass = asm.CreateLabel("pass");
 
-        foreach (var (at, expect, name) in checks)
-        {
-            if (at < 0 || at >= code.Length)
-            {
-                Plugin.Log.Error($"{Tag} stub 自检失败：{name} 的 rel8 偏移 {at} 越界（长度 {code.Length}）。");
-                continue;
-            }
+            // ★★ 关键：hook 点在 `je` 上，**两种情况都会执行到**：
+            //   ① g.gridType == Obstacle  → 原本会跳（障碍格被排除）
+            //   ② g.gridType != Obstacle  → 原本不跳，落到 0x180a8d8bc 继续
+            //   所以 stub **必须自己再判一次 gridType**。
+            //
+            //   ⚠️ 初期漏了 ② 分支，把所有普通格也跳去 skip ——
+            //      后果是移动范围只剩脚下那一格（实机复现）。
+            //
+            // rax = 邻格 g（上一条 cmp 刚读过）；rcx/rdx 为易失寄存器，可自由使用。
 
-            int dest = at + 1 + (sbyte)code[at];
+            // g.gridType == Obstacle ?
+            asm.cmp(__dword_ptr[rax + OffGridType], GridTypeObstacle);
 
-            if (dest != expect)
-            {
-                Plugin.Log.Error(
-                    $"{Tag} stub 自检失败：{name} 的跳转目标算出 +{dest:x}，期望 +{expect:x}。" +
-                    "参数判定会错乱，请检查 BuildStub 的指令布局。");
-            }
-        }
+            // ── 出口 ①：非障碍格 → 原样继续（不可省！）
+            asm.jne(exitPass);
 
-        // 两个出口都必须落在 stub 内部且互不相同。
-        if (passOff == skipOff)
-        {
-            Plugin.Log.Error($"{Tag} stub 自检失败：出口重叠（pass={passOff} skip={skipOff}）。");
-        }
+            // ---- 以下只在「障碍格」时执行 ----
+            asm.mov(rcx, __qword_ptr[rax + OffObstale]);   // g.obstale
+            asm.test(rcx, rcx);
+            asm.jz(exitSkip);                              // 无障碍物数据 -> 保持原行为
 
-        if (passOff >= code.Length || skipOff >= code.Length)
-        {
-            Plugin.Log.Error($"{Tag} stub 自检失败：出口越界（pass={passOff} skip={skipOff} 长度={code.Length}）。");
-        }
+            asm.cmp(__dword_ptr[rcx + OffObstacleType], ObstacleTypeWall);
+            asm.jne(exitSkip);                             // 普通障碍（造景/木桶…）-> 保持原行为
+
+            // == selfTeamID ?
+            asm.mov(edx, __dword_ptr[rcx + OffObstacleTeam]);
+            asm.cmp(edx, __dword_ptr[rsp + SelfTeamIdStackOffset]);
+            asm.jne(exitSkip);                             // 他方城墙 -> 保持原行为
+
+            // ---- 两个出口 ----
+            //
+            // ⚠️⚠️ 出口跳转**不能用 rax 做中转**（已踩坑，gdb 现场：
+            //     rax=0x180a8d8bc 跳到该处后 `mov r9,[rax]` 读到代码字节当类指针，
+            //     再 `[r9+0x140]` 即 SIGSEGV）。
+            //
+            //   原因：`pass`（0x180a8d8bc）是紧跟 `cmp` 的**原始代码**，
+            //   它**依赖 `cmp` 留下的 rax = 邻格 g**。
+            //
+            //   两个出口后续代码均不读 r11（已核实），所以统一用 r11 中转。
+            //
+            // ⚠️ pass 必须紧跟检查：三条全不跳时**顺序落入** pass。
+            asm.Label(ref exitPass);
+            asm.ExitViaImm64(RuntimeVa(VaPass));
+            asm.Label(ref exitSkip);
+            asm.ExitViaImm64(RuntimeVa(VaSkip));
+        });
     }
 }

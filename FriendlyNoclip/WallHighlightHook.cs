@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Iced.Intel;
+using static Iced.Intel.AssemblerRegisters;
 
 namespace Unnamed42.FriendlyNoclip;
 
@@ -229,16 +231,24 @@ internal sealed class WallHighlightHook : NativeHookBase
 
 
             // gate B 用同一个 stub 形态：放行 = 落到 je 的**下一条指令**（即 cmp 之后）。
-            long fallThrough = (long)(VaGateB + JccOffset + 6);
-            byte[] code = BuildPassStub(RuntimeVa(VaGateBSkip), fallThrough);
-
-            IntPtr stub = NativeMemory.AllocateExecutable(code.Length);
+            //
+            // 与主 gate 一样：先分配地址、再构码（可重定位出口需要 rip）。
+            IntPtr stub = NativeMemory.AllocateExecutable(AllocatedStubLength);
 
             if (stub == IntPtr.Zero)
             {
                 Plugin.Log.Warning($"{Tag} gate B 分配可执行内存失败。");
                 return false;
             }
+
+            byte[] code = BuildPassStub(Tag, stub.ToInt64(), RuntimeVa(VaGateB + JccOffset + 6));
+
+            if (code.Length == 0 || code.Length > AllocatedStubLength)
+            {
+                Plugin.Log.Warning($"{Tag} gate B stub 构码失败或超长（{code.Length} 字节），放弃。");
+                return false;
+            }
+
             System.Runtime.InteropServices.Marshal.Copy(code, 0, stub, code.Length);
 
             var hook = new MelonLoader.NativeUtils.NativeHook<DetourSignature>(hookSite, stub);
@@ -277,27 +287,21 @@ internal sealed class WallHighlightHook : NativeHookBase
     /// 在这里重复判断反而会引入「两处判据不一致」的风险。
     /// </para>
     /// </summary>
-    protected override byte[] BuildStub() =>
-        BuildPassStub(RuntimeVa(VaGateASkip), RuntimeVa(VaGateA + JccOffset + 6));
+    protected override byte[] BuildStub(long stubRip) =>
+        BuildPassStub(Tag, stubRip, RuntimeVa(VaGateA + JccOffset + 6));
 
     /// <summary>
-    /// 生成「一律放行」stub：直接跳到 <c>je</c> 的落空点（即 cmp 之后的下一条指令）。
+    /// 生成「一律放行」stub：直接跳到 <c>je</c> 的落空点（即 <c>cmp</c> 之后的下一条指令）。
     ///
     /// <para>
-    /// <paramref name="unusedSkip"/> 保留仅为日志对照，证明我们**没有**选它。
+    /// 用 <c>r11</c> 而非 <c>rax</c> —— 落空点紧跟 <c>cmp</c>，后续代码要用 <c>cmp</c>
+    /// 留下的标志位，且本项目在 <c>rax</c> 中转上真实崩过（见 AGENTS.md §6.1）。
+    /// </para>
+    /// <para>
+    /// <c>mov r11,imm64</c> 与 <c>lea r11,[rip+x]</c> 都<b>不读写标志位</b>，
+    /// 所以两种出口形态对这里都安全。
     /// </para>
     /// </summary>
-    private static byte[] BuildPassStub(long unusedSkip, long fallThrough)
-    {
-        var stub = new List<byte>(16);
-
-        // mov r11, imm64 ; jmp r11
-        // 用 r11 而非 rax —— 落空点紧跟 cmp，后续代码要用 cmp 留下的标志位，
-        // 且本项目在 rax 中转上真实崩过（见 AGENTS.md）。
-        stub.AddRange(new byte[] { 0x49, 0xBB });
-        stub.AddRange(BitConverter.GetBytes(fallThrough));
-        stub.AddRange(new byte[] { 0x41, 0xFF, 0xE3 });
-
-        return stub.ToArray();
-    }
+    private static byte[] BuildPassStub(string tag, long stubRip, long fallThrough) =>
+        StubAssembler.Build(tag, 16, stubRip, asm => asm.ExitViaImm64(fallThrough));
 }

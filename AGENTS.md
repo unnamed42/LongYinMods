@@ -682,8 +682,9 @@ monodis --customattr MyMod.dll | grep -i HarmonyPatch   # IL 层核实已清干�
 ### 6.1b ★ 手写机器码的正确替代：用 MelonLoader 自带的 **Iced** 汇编
 
 **结论：不要手写字节。运行时就有一个完整的 x86 汇编器可用，零新依赖。**
-> ✅ **2026-10 已在活进程里实测验证**（不是照文档推测）：用 `Iced.Assembler`
-> 重建 `WallPassHook` 的整段 stub，输出与手写字节**逐字节完全一致（59 字节）**：
+> ✅ **2026-10 已在活进程 + 离线两路实测验证**（不是照文档推测）：
+> 用 `Iced.Assembler` 重建本 mod 的**两个** stub，输出与手写字节**逐字节完全一致**
+> （`WallPassHook` 59 字节、`FriendlyPassHook` 60 字节）：
 >
 > ```
 > 83 78 14 02 75 1B 48 8B 48 30 48 85 C9 74 1F 83 79 10 01 75 19 8B 51 2C
@@ -692,21 +693,21 @@ monodis --customattr MyMod.dll | grep -i HarmonyPatch   # IL 层核实已清干�
 > 49 BB 6B DA 9F F6 FF 6F 00 00 41 FF E3
 > ```
 >
-> 包括四个 `jcc` 的位移（`1B` / `1F` / `19` / `0D`）全部对得上 ——
+> 包括**四个** `jcc` 的位移（`1B` / `1F` / `19` / `0D`）与两个出口全部对得上 ——
 > **说明它确实能替掉手算，而不仅仅是「能编码」**。
+> 本项目已据此**把两个 hook 的手写汇编全部改成 Iced**（见 §6.1c 的做法与实测到的 API 陷阱）。
 | 库 | 位置 | 能做什么 |
 |---|---|---|
 | **Iced** 1.21 | `gamedir/MelonLoader/net6/Iced.dll`（1.9MB，**已随 MelonLoader 加载**） | **汇编 + 反汇编 + 编码**，完整 x64 |
 | **Dobby** | 在 `gamedir/version.dll`（MelonLoader 原生宿主）里，由 `MelonLoader.MelonUtils.NativeHookAttach` / `NativeHook< T >` 封装 | 装 detour + **指令搬迁**（它自己负责 rel32 可达的跳板） |
-
 **Iced 的关键 API**（实测存在，`Iced.Intel`）：
 
 ```csharp
 var asm = new Assembler(64);
-var lbl = asm.CreateLabel();          // 建标签
+var lbl = asm.CreateLabel("skip");     // 建标签（可带名字，报错信息里会显示）
 asm.cmp(rax, 2);                      // 每个助记符一个方法
 asm.je(lbl);                          // 按标签跳，偏移由它算
-asm.Label(ref lbl);                   // 绑定标签位置
+asm.Label(ref lbl);                   // 绑定标签位置（必须在 emit 结束前全部绑完）
 
 // 编码：只需告诉它代码将落在哪个地址
 var writer = new CodeWriterImpl();    // 需自己实现 Iced.Intel.CodeWriter
@@ -717,6 +718,8 @@ asm.Assemble(writer, rip, BlockEncoderOptions.None);
 > `Assemble(CodeWriter, rip, BlockEncoderOptions)` 的 **`rip` 参数**正是
 > 「这段代码将来运行在哪个地址」。**因为我们的 stub 是运行时分配地址的**，
 > 这个参数天然合身 —— 先 `AllocateExecutable()`，拿到地址后传给 `Assemble`。
+> ⚠️ 注意这反过来要求**先分配、再构码**；早期版本是「先构码、后分配」，
+> 那时 `BuildStub()` 还不知道自己会落在哪里。
 
 **它能直接消灭本项目已经踩过的两类坑**：
 
@@ -737,6 +740,67 @@ asm.Assemble(writer, rip, BlockEncoderOptions.None);
 > csproj 里用 `<Private>False</Private>` 引用即可（运行时已经有），
 > **不要**拷进输出目录、也不需要 ILRepack。
 
+### 6.1c 用 Iced 写 stub 的四条实测规则
+
+文档里没写、但**不遵守就一定出问题**的四条（本项目逐条踩过）：
+
+1. ⚠️ **一个指令位置最多绑一个标签**。连续两次 `Label(ref a); Label(ref b);` 抛：
+   ```
+   ArgumentException: At most one label per instruction is allowed
+   ```
+   → 两个出口必须落在两条不同的指令上（正常写法本来就是这样）。
+
+2. ⚠️ **标签之后必须有指令**。在 stub 末尾绑一个「收尾标签」会抛：
+   ```
+   InvalidOperationException: Unused label end@3. You must emit an instruction after emitting a label.
+   ```
+   → **不要建收尾标签**；标签只绑在真正会被跳到的指令上。
+   > 这条对排查很有用：`Assemble` 对「漏绑 / 悬空标签」是**抛异常**而不是返回 false，
+   > 所以一定要用 `TryAssemble` 并自己 `try/catch` 兜住 —— 否则一个 stub 写错会直接打断游戏启动。
+
+3. ⚠️ **内存操作数的 DSL 不是 `dword_ptr(...)`**（Rust 版 Iced 是那样），而是：
+   ```csharp
+   AssemblerRegisters.__dword_ptr[rax + 0x14]     // 工厂是结构体实例，用双下划线静态字段
+   __qword_ptr[rcx + 0x30]
+   __qword_ptr[label]                            // lea 取标签地址
+   ```
+   寄存器同样是静态字段（`AssemblerRegisters.rax`）。裸写 `rax` 需要
+   `using static Iced.Intel.AssemblerRegisters;`，否则 `CS0103`。
+   另：`Decoder` 在 `Iced.Intel` 与 `System.Text` 里**同名** ——
+   同时 `using System.Text;` 时必须写全 `Iced.Intel.Decoder.Create(...)`（否则 `CS0104`）。
+
+4. ⚠️ **出口不要用绝对地址**（除非有特别理由）。`asm.jmp(0x180A8D8BC)` 能编码，
+   但它**不可重定位** —— stub 一旦被搬到别处（离线基准、原地热替换），跳转还指向旧地址。
+   用**尾部绑定标签**的做法（名字自解释：出口是「发射一段跳转」而不是回调）：
+   ```csharp
+   Label exitSkip = asm.CreateLabel("skip");
+   asm.jne(exitSkip);                        // 引用标签
+   …
+   asm.Label(ref exitSkip); asm.ExitViaImm64(RuntimeVa(VaSkip));   // 尾部绑定
+   ```
+   > 关于出口指令本身：`mov r11,imm64`（11 字节）与 `lea r11,[label]`（7 字节）
+   > **都可行，输出逐字节相同**，且两者**都不读写标志位** ——
+   > 这点很关键，因为我们的 hook 点常常就落在 `jcc` 上，替换后紧接着要重判条件。
+   > 本项目目前用 `mov r11,imm64`：它与既有手写版本**逐字节一致**，便于回归对照。
+
+**⭐ 顺带拿到的两项收益**（手写时代做不到）：
+
+- **可重定位**：出口相对寻址，位置无关。
+- **免费自检**：标签的最终地址由汇编器算，可以把「预期出口地址」声明出来自动对账。
+  本项目在 `NativeHookBase` 里做了 `VerifyExits`：扫描 stub 里的出口立即数，
+  与子类声明的 `ExpectedExits` 比对，不一致就报 `ERROR`。
+  → 把「出口跳错」从**玄学现象**（格子不亮 / AI 站到玩家头上）提前成**安装日志里的一行**。
+  > 💡 **这个自检第一次跑就拓到了一只真虫子**：日志里报
+  > 「出口指向 0x…，不在声明的出口集合里（`pass=0x0 skip=0x0`）」——
+  > 原因是预期值写成了 `static readonly` 字段，而静态字段初始化发生在
+  > **模块基址解析之前**，那时 `RuntimeVa` 返回 0。
+  > 改成**属性**（每次读取重新换算）即好。
+  > **教训：任何依赖「运行时已初始化状态」的值都不能放在静态字段初始化里** ——
+  > 它会在一个看似无关的地方静默变成 0。
+
+> ⚠️ **Iced 只解决「编码」，不解决「选对 hook 点与出口」**。
+> 本项目最大的两个坑（跳到路径中段 → 静默失效；跳过 `AroundGridHaveEnemy` → AI 站到玩家头上）
+> 都不是编码问题，Iced 帮不上忙。详见 §6.1 的那两条。「能汇编」不等于「能挂钩」。
 ### 6.2 运行时读类型描述符槽（强烈推荐，省掉手写机器码）
 
 图像里那些 `mov rdx,[rip+X]` 的 `X` 是**类型/属性描述符槽**。它们文件期在 BSS 里是未初始化的（离线 `va2off` 返回 None、解码全 OUT OF RANGE），**但游戏跑起来后已被 IL2CPP 填好**，所以在 mod 里读它们能直接拿到类型名/属性名/方法名 —— **不需要插桩、不需要写机器码**。

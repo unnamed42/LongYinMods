@@ -902,26 +902,68 @@ Navigate((5,12) -> (5,13)) = ok len=1 searched=1     ← 起点是空地，搜�
 > 而没有去查**搜索本身能不能跑起来**。教训：当“输入对、判定对、但就是不生效”时，
 > 应该去查**上限 / 计数 / 容量**这类**边界参数**，而不是继续在判定逻辑里找。
 
-### 7.2 为什么不用 Reloaded.Assembler 做运行时汇编
+### 7.2 运行时汇编：**已从手写机器码迁移到 Iced**
 
-**结论：能做、已验证可行，但决定不做**（用户 m01567：「好吧，那就算了。」）。
+**结论：2026-10 已完成迁移。三个 stub 全部改用 `Iced.Assembler` 生成，不再手写字节。**
 
-**替代品更好**：游戏进程里**已有 `Iced` 1.21.0**（`gamedir/MelonLoader/net6/Iced.dll`，MelonLoader 自带），含完整 `Encoder` / `BlockEncoder` / `Assembler` / `Decoder`，**纯托管、零 P/Invoke**。MCP 活进程实测它与现有硬编码逐字节一致，且能自动算 rel8 回填（`test al,al; je L; nop; L: nop` → `84 c0 74 01 90 90`，偏移是自动回填的）。
+**迁移的触发点**：手写汇编在本项目**真实崩过两次**，而且两次的症状都不是「编译报错」：
+
+| 事故 | 根因 | 症状 |
+|---|---|---|
+| SIGILL（战斗刚开始即崩） | 把 rel8 的**操作数偏移**当成 **opcode 偏移**，回填时把位移写盖在 `0x74` 操作码上 | 立即崩溃 |
+| AI 站到玩家头上 | 出口选在**接受路径的中段**，跳过了 `AroundGridHaveEnemy` | **不崩**，行为静默错误 |
+
+第二类不是编码问题（Iced 帮不上忙，见 §4.2 教训 17–18），
+但第一类**正是编码问题** —— 而它属于「只要还手写就可能再犯」的那一类。用户因此提出用汇编器（m0xxxx）。
+
+**验证方式：逐字节对比，而不是「看起来能跑」**。
+迁移的每一步都拿**迁移前的硬编码字节当基准**：
+
+```
+WallPassHook      手写 59 字节 / Iced 59 字节   ✅ 逐字节完全一致
+FriendlyPassHook  手写 60 字节 / Iced 60 字节   ✅ 逐字节完全一致
+```
+
+包括四个 `jcc` 的位移（`1B` / `1F` / `19` / `0D`）与两个出口。
+**离线**（独立小程序跑 `Iced`）与**活进程**（MCP `execute_csharp`）两路都验过。
+
+> 这一点很重要：如果不是逐字节一致，就无法区分「迁移引入的新问题」与「原有的老问题」。
+> **有已知正确的输出当基准，重构才是可验证的** —— 这是本次迁移能安全完成的前提。
+
+**迁移后新增的两项能力**（手写时代做不到）：
+
+1. **出口可重定位**。出口改用**尾部绑定标签** + 相对寻址的形态，
+   而不是把绝对地址写死成立即数。位置无关，便于离线打基准与将来可能的原地热替换。
+   （实测 `mov r11,imm64` 与 `lea r11,[label]` **输出逐字节相同**，
+   本项目为保持与既有版本一致，当前用前者，但结构上已支持后者。）
+2. **安装时自检出口**。`NativeHookBase.VerifyExits` 扫描 stub 里的出口立即数，
+   与各 hook 声明的 `ExpectedExits` 对账，不一致就打 `ERROR`。
+   → 把「出口跳错」从**玄学现象**提前成**安装日志里的一行**。
+
+**安装顺序也跟着改了：先分配地址、再构码**（`BuildStub(long stubRip)`）。
+可重定位出口需要在汇编时就知道 stub 自己会落在哪里，所以必须
+`AllocateExecutable` → `BuildStub(rip)` → 校验码长 → 拷贝。
+早期是「先构码、后分配」，那时 stub 还不知道自己的地址。
+
+**为什么还是不用 Reloaded.Assembler**（原结论保留）：
+它会向一个**已经因原生侧崩溃吃过两次亏**的 mod 再引入一个**原生 DLL 加载器**
+（NuGet + `FASMX64.dll`，LGPL v3，需随 mod 分发，且在 Wine 下要额外验证）。
+而 `Iced` 1.21 **进程里本来就有**（MelonLoader 自带，`MelonLoader/net6/Iced.dll`，1.9MB），
+**纯托管、零 P/Invoke、零新增依赖** —— 没有任何理由选前者。
 
 | | Iced | Reloaded.Assembler |
 |---|---|---|
-| 新增依赖 | **零**（进程内已在） | NuGet + 原生 `FASMX64.dll`（LGPL v3，需随 mod 分发） |
+| 新增依赖 | **零**（进程内已在） | NuGet + 原生 `FASMX64.dll` |
 | 文本助记符 | 无（强类型 API） | 有 |
 | 自动分支编码 | `BlockEncoder` 自动选 rel8/rel32 | FASM 也做 |
-| **P/Invoke** | **纯托管** | **P/Invoke 原生 DLL**，Linux/Wine 下要额外验证 |
+| **P/Invoke** | **纯托管** | **P/Invoke 原生 DLL** |
 
-**决定性理由**：Reloaded.Assembler 会向一个**已经因原生侧崩溃吃过两次亏**的 mod 再引入一个原生 DLL 加载器。
+**踩到的 Iced API 规则**（详见 AGENTS.md §6.1c）：一个指令位置最多绑一个标签、
+标签之后必须有指令（所以不要建收尾标签）、内存操作数写 `__dword_ptr[...]` 而非 `dword_ptr(...)`。
 
-**收益不足的理由**：手写代码只有约 **70 字节、9 条指令**，其复杂度不来自「手写机器码」，而来自两件与汇编器无关的事 ——（1）`[rsp+0xd8]` 依赖 `Navigate` 的栈帧布局；（2）三个出口地址是运行时算的。且该代码长期稳定运行，而它的邻居（`OnEnter` detour）出过两次崩溃，**风险/收益比不划算**。
-
-**若将来要做**（分两步，别一次做完）：第一步只换 `BuildStub()` + `EmitAbsoluteJump()`，csproj 加 `<Reference Include="Iced"><HintPath>$(MelonLoaderDir)\Iced.dll</HintPath><Private>False</Private></Reference>`，用 `CreateLabel`/`Label` 替代 4 处 rel8 回填，**加 `diagnostics` 门控的字节对比验证**（Iced 输出与现有硬编码逐字节一致才切换）；第二步等要写更复杂 stub（如操作栈帧）时再考虑。
-
-（`Assembler` API 要点：必须用 `CreateLabel(string)` 创建 label；`Label(ref Label)` 是 ByRef；**label 之后必须还有指令**，否则 `Assemble` 抛 `Unused label`。）
+> ⚠️ **迁移不改变的一件事**：Iced 只消除「手算编码」错误。
+> **「hook 点选在哪」「出口跳到哪」仍然是靠读懂反汇编得到的判断** ——
+> 本项目最大的两个坑都在这里，Iced 帮不上忙。
 
 ### 7.3 为什么判据是「原主自己的 `mapGrid`」而不是旁表
 
