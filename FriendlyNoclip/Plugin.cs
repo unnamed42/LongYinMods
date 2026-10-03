@@ -198,18 +198,30 @@ public class Plugin : MelonMod
         //   与 GridUnitData.OnLeave 的 Postfix（纯托管层），
         //   不再需要任何 native detour —— 详见下方 TryPatch 调用处的注释。
 
-        // ★★ 城墙「可跨越」：直接在战斗开始时改写 GridUnitData.passes。
+        // ★★ 城墙「可跨越」：在障碍物建好后改写 GridUnitData.passes。
         //
-        // 为什么钩 BattleMapData.Generate 而不是 PrepareBattleMap：
-        //   PrepareBattleMap 有 11 个重载，CallerCount 分散（73/189/58/…），
-        //   不是单一入口；而 Generate 的调用者【全二进制只有 1 个】
-        //   （0x180816368，位于 PrepareBattleMap 内），
-        //   且它跑在格子建好之后、任何寻路之前 —— 最干净的开局钩子。
+        // ⚠️⚠️ 钩点必须是 **GenerateMapObjs**，不能是 Generate。
+        //   实测日志：[城墙通行] 已放行 **0** 面己方城墙 —— 因为
+        //   battleMapData.Generate() 只做**布局**，障碍物还没建，
+        //   那时 obstacleGrids 是空的。真实的创建链是：
+        //
+        //     BattleController.PrepareBattleMap
+        //       ├─ BattleMapData.Generate()        @0x180816368  ← 曾经钩在这里（太早）
+        //       └─ BattleMapData.GenerateMapObjs() @0x18081683f  ← 现在钩这里 ✅
+        //            └─ GenerateBuildingObstacle
+        //                 ├─ GenerateWallData      ← 城墙在这里诞生
+        //                 └─ GenerateObstacleData
+        //
+        //   两者都只有 1 个直接调用者（均在 PrepareBattleMap 内），
+        //   所以钩哪个都是一对一；区别只在**时机**。
+        //
+        // 为什么不用 PrepareBattleMap：它有 11 个重载、CallerCount 分散
+        //   （73/189/58/…），不是单一入口，容易挂错重载。
         if (WallPassEnabled.Value)
         {
             patched += TryPatch(
-                nameof(BattleMapData), "Generate",
-                nameof(BattleMapData_Generate_Postfix));
+                nameof(BattleMapData), "GenerateMapObjs",
+                nameof(BattleMapData_GenerateMapObjs_Postfix));
 
             // 战斗结束恢复原值（passes 的写入者未定位，采用可回滚策略）。
             patched += TryPatch(
@@ -1015,20 +1027,21 @@ public class Plugin : MelonMod
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// <c>BattleMapData.Generate</c> 的 Postfix —— 战斗开局的唯一钩子。
+    /// <c>BattleMapData.GenerateMapObjs</c> 的 Postfix —— 城墙放行的唯一钩子。
     ///
     /// <para>
-    /// 用 Postfix（而非 Prefix）：<c>Generate</c> 体内会创建全部格子，
+    /// 用 Postfix（而非 Prefix）：本方法**体内**才创建障碍物
+    /// （<c>GenerateBuildingObstacle</c> → <c>GenerateWallData</c>），
     /// 必须在它**跑完之后**才能遍历 <c>obstacleGrids</c>。
     /// </para>
     ///
     /// <para>
-    /// 为什么这个位置安全：<c>Generate</c> 的调用者全二进制只有 1 个
-    /// （<c>0x180816368</c>，在 <c>PrepareBattleMap</c> 内），
-    /// 且它一定跑在任何寻路/范围计算之前。
+    /// ⚠️ <b>不要改回 <c>Generate</c></b>：那个方法只做布局，
+    /// 跑完时 <c>obstacleGrids</c> 还是空的 —— 实测会打印
+    /// 「已放行 <b>0</b> 面己方城墙」。两个方法的调用链见注册处的注释。
     /// </para>
     /// </summary>
-    internal static void BattleMapData_Generate_Postfix(BattleMapData __instance)
+    internal static void BattleMapData_GenerateMapObjs_Postfix(BattleMapData __instance)
     {
         try
         {
