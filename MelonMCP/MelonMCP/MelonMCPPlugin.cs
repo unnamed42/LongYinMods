@@ -271,6 +271,14 @@ namespace MelonMCP
             _server.RegisterTool(new WatchFieldToolDefinition());
             _server.RegisterTool(new UnwatchFieldToolDefinition());
 
+            // Configuration tools. Built on MelonPreferences (part of MelonLoader itself) rather
+            // than on MelonPreferencesManager, so they work on any MelonLoader install and do not
+            // require a human-facing in-game UI that an agent could not open anyway.
+            _server.RegisterTool(new ListConfigsToolDefinition());
+            _server.RegisterTool(new GetConfigToolDefinition());
+            _server.RegisterTool(new SetConfigToolDefinition());
+            _server.RegisterTool(new ResetConfigToolDefinition());
+
             LoggerInstance.Msg($"Registered {_server.ToolCount} MCP tools");
         }
 
