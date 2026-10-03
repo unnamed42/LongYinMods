@@ -68,8 +68,15 @@ internal static class WallPassData
     /// <summary><c>ObstacleData.teamID</c>（int32）的偏移。</summary>
     private const int OffObstacleTeam = 0x2C;
 
-    /// <summary><c>ObstacleType.Wall</c>。</summary>
-    private const int ObstacleTypeWall = 1;
+    /// <summary>
+    /// <c>ObstacleType.Wall</c>。
+    ///
+    /// <para>
+    /// 公开给 <c>Plugin.BattleController_GenerateMovePath_Prefix</c> 用（城墙禁停）——
+    /// 两处必须用**同一个判据**，否则「放行哪些墙」与「禁停哪些墙」会不一致。
+    /// </para>
+    /// </summary>
+    internal const int ObstacleTypeWall = 1;
 
     /// <summary>
     /// 普通格子的 <c>passes</c> 取值。实测 <c>normalGrids</c> 全部为 15（无例外），
@@ -186,8 +193,64 @@ internal static class WallPassData
             Plugin.Log.Warning($"[城墙通行] 置位异常：{e.Message}");
         }
     }
-
     /// <summary>
+    /// 判断一格是否为<b>城墙</b>，是则输出它的 <c>teamID</c>。
+    ///
+    /// <para>
+    /// 【为什么单独抽出来】<see cref="Apply"/> 用这套偏移决定「放行哪面墙」，
+    /// 而城墙禁停钩子用同一套决定「禁停哪面墙」—— <b>两处必须看同一个字段</b>，
+    /// 否则会出现「放行了但不让停」「没放行却按城墙拦」这类不一致。
+    /// 抽成一个方法就不会走偏。
+    /// </para>
+    ///
+    /// <para>
+    /// 与 <see cref="Apply"/> 一样用<b>原生指针读</b>，不走托管代理：
+    /// 代理属性名带游戏自己的拼写错误（<c>obstalceType</c>），
+    /// 一旦上游改名就会静默读到别的字段。
+    /// </para>
+    /// </summary>
+    /// <param name="grid">待判定的格子；为 null 或非城墙时返回 false。</param>
+    /// <param name="teamID">城墙所属队伍；非城墙时为 0。</param>
+    internal static bool TryGetWallTeam(GridUnitData? grid, out int teamID)
+    {
+        teamID = 0;
+
+        try
+        {
+            if (grid == null)
+            {
+                return false;
+            }
+
+            IntPtr gridPtr = IL2CPP.Il2CppObjectBaseToPtr(grid);
+
+            if (gridPtr == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            IntPtr obstaclePtr = Marshal.ReadIntPtr(gridPtr + OffObstale);
+
+            if (obstaclePtr == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            if (Marshal.ReadInt32(obstaclePtr + OffObstacleType) != ObstacleTypeWall)
+            {
+                return false;
+            }
+
+            teamID = Marshal.ReadInt32(obstaclePtr + OffObstacleTeam);
+            return true;
+        }
+        catch
+        {
+            // 读不了就一律当作「不是城墙」—— 让调用方放行，而不是拦错。
+            return false;
+        }
+    }
+
     /// 把 <see cref="Apply"/> 改过的格子恢复成原值。战斗结束时调用。
     /// </summary>
     internal static void Restore()
