@@ -67,10 +67,20 @@ public class Plugin : MelonMod
     internal static MelonPreferences_Entry<bool> WallPassEnabled = null!;
 
     /// <summary>
-    /// 城防相关的**原生 detour**（<see cref="WallPassHook"/> + <see cref="WallHighlightHook"/>）。
-    /// 关掉后仍保留 <c>passes</c> 数据写入。仅供二分定位崩溃用。
+    /// 【已废弃】旧的合并开关（同时管两个原生 detour）。
+    /// 保留仅为兼容旧配置；实际已拆成下面两个。
     /// </summary>
     internal static MelonPreferences_Entry<bool> WallNativeHooksEnabled = null!;
+
+    /// <summary><see cref="WallPassHook"/>（改 <c>Navigate</c> 里的障碍判定）。</summary>
+    internal static MelonPreferences_Entry<bool> WallPassHookEnabled = null!;
+
+    /// <summary>
+    /// <see cref="WallHighlightHook"/>（改 <c>GetMoveRangeGrids</c> 里的两处障碍判定）。
+    /// 二分第一轮已确认崩溃出自「原生 detour」；这个是主嫌疑（dump 显示
+    /// 崩溃紧跟 <c>call GetMoveRangeGrids</c> 之后）。
+    /// </summary>
+    internal static MelonPreferences_Entry<bool> WallHighlightHookEnabled = null!;
 
 
 
@@ -116,21 +126,22 @@ public class Plugin : MelonMod
             "允许穿越属于自己队伍的城墙（ObstacleType.Wall 且 teamID == selfTeamID）。" +
             "守方 AI 自动获得同样能力；中立障碍与他方城墙不受影响。");
 
-        // ★ 二进制定位用的细开关：把「城墙可跨越」拆成两块。
-        //
-        // 开 wall_pass 实际会装 4 样东西：
-        //   ① GenerateMapObjs 的 Postfix（写 passes）
-        //   ② BattleRealEnd 的 Postfix（恢复 passes）
-        //   ③ WallPassHook（Navigate 里的原生 detour）
-        //   ④ WallHighlightHook（GetMoveRangeGrids 里的两个 detour）
-        // 共享一个开关时，一出问题就只能全关，无法判定是哪一块。
-        // 这个开关单独控制 ③④（原生 detour 那两块）—— 它们最可能
-        // 引入崩溃（直接改代码段）。①② 是纯数据写入，风险低得多。
-        WallNativeHooksEnabled = Category.CreateEntry(
-            "wall_native_hooks", true,
-            "城防原生 detour（WallPassHook + 高亮）",
-            "关闭后仅保留 passes 数据写入（GenerateMapObjs/BattleRealEnd），" +
-            "不再安装任何原生 hook。用于二分定位崩溃。");
+        // ★ 二分开关：开 wall_pass 实际会装 4 样东西：
+        //   ① GenerateMapObjs 的 Postfix（写 passes）  —— 纯数据
+        //   ② BattleRealEnd  的 Postfix（恢复 passes） —— 纯数据
+        // 二分第一轮结果：合并开关=false 后不崩（passes 仍在）
+        // => 崩溃出在两个原生 detour 之一。所以进一步拆开。
+
+        WallPassHookEnabled = Category.CreateEntry(
+            "wall_pass_hook", true,
+            "城防 detour（WallPassHook）",
+            "改 Navigate 里的障碍格判定。关闭后不影响其它功能。");
+
+        WallHighlightHookEnabled = Category.CreateEntry(
+            "wall_highlight_hook", true,
+            "高亮 detour（WallHighlightHook）",
+            "改 GetMoveRangeGrids 里的两处障碍格判定（让墙对面亮起来）。" +
+            "二分主嫌疑：dump 显示崩溃紧跟 call GetMoveRangeGrids 之后。");
         // ★ 「穿越不留痕」的探测点：EnterGrid 是 6 个调用点的唯一汇聚处，
         //   且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
         FixOccupancy = Category.CreateEntry(
@@ -146,21 +157,42 @@ public class Plugin : MelonMod
         {
             FriendlyPassHook.Instance.Install();
         }
-        if (WallPassEnabled.Value && WallNativeHooksEnabled.Value)
+        // ★★ 两个原生 detour **分开开关**（而不是共享 wall_native_hooks）。
+        //
+        // 二分第一轮结果：wall_native_hooks=false 后**不再崩溃**，
+        // 而 passes 数据写入仍在（已放行 22 面）——
+        // => 崩溃由这两个之一引起，数据写入与既有问题全部排除。
+        //
+        // 再分一轮就能定位到具体哪个：
+        //   wall_highlight_hook=false 而 wall_pass_hook=true
+        //     -> 不崩 ⇒ 是高亮 hook（与 dump 的旁证一致）
+        //     -> 还崩 ⇒ 是 WallPassHook
+        bool passHookOn = WallPassEnabled.Value && WallPassHookEnabled.Value;
+        bool highlightHookOn = WallPassEnabled.Value && WallHighlightHookEnabled.Value;
+
+        if (passHookOn)
         {
             WallPassHook.Instance.Install();
+        }
 
+        if (highlightHookOn)
+        {
             // ★ 高亮侧：GetMoveRangeGrids 有**两套独立的**障碍格判定，
             //   与 Navigate 那套互不相干。只 hook Navigate 时，城墙格
             //   明明可达（Navigate 返回 true）却永远不亮。
             WallHighlightHook.Instance.Install();
             WallHighlightHook.Instance.InstallSecondGate();
         }
+
+        if (WallPassEnabled.Value && !passHookOn && !highlightHookOn)
+        {
+            LoggerInstance.Msg(
+                "[城防] 两个原生 detour 均已关闭：仅保留 passes 数据写入（二分定位模式）。");
+        }
         else if (WallPassEnabled.Value)
         {
             LoggerInstance.Msg(
-                "[城防] wall_native_hooks=false：已跳过原生 detour，" +
-                "仅保留 passes 数据写入（二分定位模式）。");
+                $"[城防] detour 开关：城防={passHookOn}，高亮={highlightHookOn}。");
         }
 
 
