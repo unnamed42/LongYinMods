@@ -66,6 +66,12 @@ public class Plugin : MelonMod
     /// <summary>原生 detour：允许穿越**己方城墙**。</summary>
     internal static MelonPreferences_Entry<bool> WallPassEnabled = null!;
 
+    /// <summary>
+    /// 城防相关的**原生 detour**（<see cref="WallPassHook"/> + <see cref="WallHighlightHook"/>）。
+    /// 关掉后仍保留 <c>passes</c> 数据写入。仅供二分定位崩溃用。
+    /// </summary>
+    internal static MelonPreferences_Entry<bool> WallNativeHooksEnabled = null!;
+
 
 
     /// <summary>「穿越不留痕」开关：写回被穿越踩掉的原主登记。</summary>
@@ -110,6 +116,21 @@ public class Plugin : MelonMod
             "允许穿越属于自己队伍的城墙（ObstacleType.Wall 且 teamID == selfTeamID）。" +
             "守方 AI 自动获得同样能力；中立障碍与他方城墙不受影响。");
 
+        // ★ 二进制定位用的细开关：把「城墙可跨越」拆成两块。
+        //
+        // 开 wall_pass 实际会装 4 样东西：
+        //   ① GenerateMapObjs 的 Postfix（写 passes）
+        //   ② BattleRealEnd 的 Postfix（恢复 passes）
+        //   ③ WallPassHook（Navigate 里的原生 detour）
+        //   ④ WallHighlightHook（GetMoveRangeGrids 里的两个 detour）
+        // 共享一个开关时，一出问题就只能全关，无法判定是哪一块。
+        // 这个开关单独控制 ③④（原生 detour 那两块）—— 它们最可能
+        // 引入崩溃（直接改代码段）。①② 是纯数据写入，风险低得多。
+        WallNativeHooksEnabled = Category.CreateEntry(
+            "wall_native_hooks", true,
+            "城防原生 detour（WallPassHook + 高亮）",
+            "关闭后仅保留 passes 数据写入（GenerateMapObjs/BattleRealEnd），" +
+            "不再安装任何原生 hook。用于二分定位崩溃。");
         // ★ 「穿越不留痕」的探测点：EnterGrid 是 6 个调用点的唯一汇聚处，
         //   且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
         FixOccupancy = Category.CreateEntry(
@@ -125,7 +146,7 @@ public class Plugin : MelonMod
         {
             FriendlyPassHook.Instance.Install();
         }
-        if (WallPassEnabled.Value)
+        if (WallPassEnabled.Value && WallNativeHooksEnabled.Value)
         {
             WallPassHook.Instance.Install();
 
@@ -134,6 +155,12 @@ public class Plugin : MelonMod
             //   明明可达（Navigate 返回 true）却永远不亮。
             WallHighlightHook.Instance.Install();
             WallHighlightHook.Instance.InstallSecondGate();
+        }
+        else if (WallPassEnabled.Value)
+        {
+            LoggerInstance.Msg(
+                "[城防] wall_native_hooks=false：已跳过原生 detour，" +
+                "仅保留 passes 数据写入（二分定位模式）。");
         }
 
 
