@@ -47,9 +47,6 @@ public class Plugin : MelonMod
 
     internal static MelonPreferences_Category Category = null!;
 
-    /// <summary>允许穿过友方单位所在的格子。</summary>
-    internal static MelonPreferences_Entry<bool> AllowFriendly = null!;
-
 
     /// <summary>
     /// 最近一次 <c>GetMoveRangeGrids</c> 调用时的地图实例。
@@ -63,17 +60,11 @@ public class Plugin : MelonMod
     /// <summary>每个移动范围计算都 dump 全部网格（日志量大）。</summary>
     internal static MelonPreferences_Entry<bool> DumpAllGrids = null!;
 
-        // ← 2026-10-05 删除了 native_probe / native_patch_probe 两个开关
-        //   及对应的 NativeProbe / NativePatchProbe 类（结论已被取代）。
     /// <summary>原生 detour：只让**敌方**阻挡，友方可穿过。</summary>
     internal static MelonPreferences_Entry<bool> NativeDetourEnabled = null!;
 
-        // ← 2026-10-05 删除了 native_onenter_detour 开关及 NativeOnEnterDetour 类。
-        //   它在 OnEnter 原生入口装自建 stub，导致尾调用目标栈偏移错 0x30，一进战斗即崩。
 
-    /// <summary>
-    /// 「穿越不留痕」开关（验证中）。当前只开启**只读探测**，不修改游戏状态。
-    /// </summary>
+    /// <summary>「穿越不留痕」开关：写回被穿越踩掉的原主登记。</summary>
     internal static MelonPreferences_Entry<bool> FixOccupancy = null!;
 
     private HarmonyLib.Harmony? _harmony;
@@ -91,14 +82,7 @@ public class Plugin : MelonMod
 
         Category = MelonPreferences.CreateCategory(CategoryId, CategoryDisplay);
 
-        // 已退役：早期版本用它驱动「补格 BFS / 剔除占位格」，两条路都被证伪 ——
-        // GetMoveRangeGrids 从不输出被占据的格子（起点除外，那是原版语义），
-        // 所以托管层没有任何可做的减法。穿越友方完全由 native_detour 负责。
-        // 条目保留只为不破坏已有 cfg。
-        AllowFriendly = Category.CreateEntry(
-            "allow_friendly", false,
-            "（已退役）托管层补丁",
-            "保留项，当前不产生任何行为。穿越友方由 native_detour 负责。");
+        // 两个功能性开关（native_detour / fix_occupancy）+ 一个诊断开关。
 
         Diagnostics = Category.CreateEntry(
             "diagnostics", false,
@@ -108,11 +92,6 @@ public class Plugin : MelonMod
             "dump_all_grids", false,
             "Dump 全部网格", "每次调用都输出整张地图的网格明细（极慢，排查时才开）。");
 
-        // ← 2026-10-05 已删除：native_probe / native_patch_probe 两个旧探针。
-        //   它们的结论（「原生侧的阻挡判定无法从托管层绕过」）已被
-        //   native_detour + EnterGrid 修复这条路线取代，代码已无用途。
-
-
         // 原生 detour：真正的实现。用 Dobby 在 Navigate 内部装 detour，
         // 只把**敌方**单位当阻挡，友方可以穿过。
         NativeDetourEnabled = Category.CreateEntry(
@@ -120,35 +99,19 @@ public class Plugin : MelonMod
             "原生 detour（只穿友方）",
             "在 MapNavigator.Navigate 内装 detour：友方格子可通过，敌方仍然阻挡。");
 
-        // ← 2026-10-05 已删除：native_onenter_detour。
-        //   它的思路（在 OnEnter 原生入口装 detour 写回原主）已被证伪：
-        //   自建的 stub 帧让 OnEnter 的尾调用目标 0x180870420 从错位 0x30 的栈
-        //   偏移恢复 xmm6/r15/r14，跳入垃圾地址 —— 一进战斗就崩。
-        //   现在的实现走 BattleUnit.EnterGrid 的 Harmony Prefix/Postfix，
-        //   完全在托管层，不需要任何原地改写。
-
-
-        // ★★ 「穿越不留痕」的正确落点（验证中）。
-        // 见 BattleUnit_EnterGrid_Prefix 的注释：EnterGrid 是 6 个调用点的唯一汇聚处，
-        // 且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
+        // ★ 「穿越不留痕」的探测点：EnterGrid 是 6 个调用点的唯一汇聚处，
+        //   且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
         FixOccupancy = Category.CreateEntry(
-            "fix_occupancy", false,
+            "fix_occupancy", true,
             "穿越不留痕（写回原主登记）",
             "路过友方格子后把被覆盖的原主登记写回。");
         _harmony = new HarmonyLib.Harmony(HarmonyId);
 
         // 原生探针/原地改写探针已于 2026-10-05 删除（结论已被取代）。
 
-        // 原地等长改写探针已于 2026-10-05 删除。
-
         // 正式的只穿友方实现：Dobby detour + 手写 stub。
         if (NativeDetourEnabled.Value)
         {
-            {
-                LoggerInstance.Warning(
-                    "native_patch_probe 与 native_detour 同时开启：两者改写同一地址，已跳过原地改写探针，只装 detour。");
-            }
-
             NativeDetour.Install();
         }
 
@@ -561,13 +524,11 @@ public class Plugin : MelonMod
             Log.Warning($"[修复·登记] OnLeave Postfix 异常：{e.Message}");
         }
     }
-
     /// <summary>
     /// <c>BattleUnit.EnterGrid(GridUnitData, bool, bool)</c> 的 Prefix ——
-    /// 「穿越不留痕」的**只读探测**。不修改任何游戏状态。
+    /// 「穿越不留痕」的**探测点**（配合 <c>GridUnitData_OnLeave_Postfix</c> 完成修复）。
     ///
     /// <para>
-    /// 【为什么选这个落点】<c>EnterGrid</c> 是单位移动的**唯一**入口：全镜像 6 个调用点
     /// （<c>RegretMove</c>/<c>EnterBattleField</c>×2/<c>HeroEnterGridDelay</c>/<c>MoveFromTarget</c>/
     /// <c>PlayBattleUnitMove</c>）全部汇到这里。它同时拿到 <c>__instance</c>（移动者）、
     /// <paramref name="grid"/>（目标格），而判定「这是穿越」所需的全部信息恰好就是这两个：
