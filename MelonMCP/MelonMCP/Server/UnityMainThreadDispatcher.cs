@@ -21,6 +21,16 @@ namespace MelonMCP.Server
         }
 
         /// <summary>
+        /// Drops the queue and clears the initialized flag. Called during mod teardown so that
+        /// closures queued by the outgoing load (which capture its assembly) are not left to run
+        /// after a hot reload, and so the old assembly is not kept alive by the queue.
+        /// </summary>
+        public static void Shutdown()
+        {
+            while (_executionQueue.TryDequeue(out _)) { }
+            _initialized = false;
+        }
+        /// <summary>
         /// Queue an action to be executed on the Unity main thread
         /// </summary>
         public static void Enqueue(Action action)

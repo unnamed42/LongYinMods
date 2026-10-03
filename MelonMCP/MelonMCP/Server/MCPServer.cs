@@ -24,6 +24,8 @@ namespace MelonMCP.Server
         private CancellationTokenSource _cancellation;
         private readonly ConcurrentDictionary<Guid, MCPClientHandler> _clients = new ConcurrentDictionary<Guid, MCPClientHandler>();
         private readonly Dictionary<string, IToolDefinition> _tools = new Dictionary<string, IToolDefinition>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The background accept loop, tracked so Stop() can wait for it to unwind.</summary>
+        private Task _acceptLoop;
 
         private bool _isRunning;
 
@@ -51,7 +53,7 @@ namespace MelonMCP.Server
             _isRunning = true;
 
             // Start accepting clients in background
-            Task.Run(AcceptClientsAsync);
+            _acceptLoop = Task.Run(AcceptClientsAsync);
         }
 
         public void Stop()
@@ -68,24 +70,53 @@ namespace MelonMCP.Server
             }
             _clients.Clear();
 
+            // Capture the listener in a local and give the accept loop its own reference to it.
+            // AcceptClientsAsync reads _listener on every iteration, so nulling the field while the
+            // loop is still parked in AcceptTcpClientAsync turns the expected ObjectDisposedException
+            // into a NullReferenceException and skips the clean break.
+            var listener = _listener;
+            _listener = null;
+
             try
             {
-                _listener?.Stop();
+                listener?.Stop();
             }
             catch { }
 
-            _listener = null;
+            // Wait for the accept loop to observe the shutdown. This is what actually makes the port
+            // reusable: on a hot reload, MelonLoader loads the new assembly as soon as
+            // OnDeinitializeMelon returns, and if the old listener socket is still held the new
+            // Start() throws at TcpListener.Start() with 'address already in use'.
+            var loop = _acceptLoop;
+            _acceptLoop = null;
+            if (loop != null)
+            {
+                try
+                {
+                    loop.Wait(TimeSpan.FromSeconds(5));
+                }
+                catch (Exception ex)
+                {
+                    MelonMCPPlugin.Logger?.Warning($"Accept loop did not shut down cleanly: {ex.Message}");
+                }
+            }
+
             _cancellation?.Dispose();
             _cancellation = null;
         }
 
         private async Task AcceptClientsAsync()
         {
-            while (_isRunning && !_cancellation.Token.IsCancellationRequested)
+            // Take a local reference to the listener: Stop() nulls the field before the loop is
+            // guaranteed to have observed the cancellation, and we want the ObjectDisposedException
+            // path below, not a NullReferenceException.
+            var listener = _listener;
+
+            while (_isRunning && _cancellation != null && !_cancellation.Token.IsCancellationRequested)
             {
                 try
                 {
-                    var client = await _listener.AcceptTcpClientAsync();
+                    var client = await listener.AcceptTcpClientAsync();
                     var clientId = Guid.NewGuid();
                     var handler = new MCPClientHandler(clientId, client, this);
                     _clients[clientId] = handler;

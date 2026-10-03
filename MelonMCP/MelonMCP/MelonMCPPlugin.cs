@@ -32,13 +32,33 @@ namespace MelonMCP
         private FieldInfo _isPausedField = null;
         private bool _gameManagerCacheAttempted = false;
 
+        /// <summary>Set by OnDeinitializeMelon so per-frame work stops once the melon is unloaded.</summary>
+        private bool _deinitialized = false;
+
+        /// <summary>
+        /// The Msg handler actually subscribed in SubscribeToAllLogEvents, kept so it can be removed
+        /// again during teardown. Which one is used depends on the MelonLoader build, so it is
+        /// recorded at subscribe time rather than guessed at unsubscribe time.
+        /// </summary>
+        private EventInfo _msgEvent = null;
+        private Delegate _msgHandler = null;
+
         public MelonMCPPlugin()
         {
             Instance = this;
         }
 
-        public override void OnApplicationStart()
+        /// <summary>
+        /// MelonLoader 0.7.x init callback. Replaces the obsolete OnApplicationStart(), which is
+        /// marked [Obsolete(..., error: true)] in 0.7.3 and is scheduled for removal.
+        ///
+        /// OnInitializeMelon runs after MelonLoader has fully initialized, so Unity and game types
+        /// are safe to touch here.
+        /// </summary>
+        public override void OnInitializeMelon()
         {
+            _deinitialized = false;
+
             // Subscribe to log events
             SubscribeToAllLogEvents();
 
@@ -47,8 +67,8 @@ namespace MelonMCP
             try
             {
                 // Apply Harmony patches to prevent games from pausing when unfocused
-                RunInBackgroundPatch.ApplyPatch();
-                GameManagerFocusPatch.ApplyPatch();
+                // RunInBackgroundPatch.ApplyPatch();
+                // GameManagerFocusPatch.ApplyPatch();
 
                 // Initialize Unity main thread dispatcher
                 UnityMainThreadDispatcher.Initialize();
@@ -69,8 +89,86 @@ namespace MelonMCP
             catch (Exception ex)
             {
                 LoggerInstance.Error($"Failed to start MelonMCP server: {ex}");
+
+                // Do not leave a half-built server behind: if the port was already bound (e.g. a
+                // previous instance was not torn down), the listener may exist but never accept.
+                try { _server?.Stop(); } catch { }
+                _server = null;
             }
         }
+
+        /// <summary>
+        /// MelonLoader teardown callback, invoked when the melon is unregistered - by shutdown, or by
+        /// a hot-reload plugin swapping the assembly out.
+        ///
+        /// This is the piece that was missing: previously only OnApplicationQuit() stopped the
+        /// server, and that never fires on a hot reload, so port 27015 stayed bound and the next
+        /// load failed. Everything this mod holds that outlives the assembly must be released here,
+        /// or the reload leaks the port and pins the old assembly in memory.
+        ///
+        /// Note: Harmony patches on the plugin's own HarmonyInstance are removed by MelonLoader
+        /// itself (MelonBase.UnregisterInstance calls HarmonyInstance.UnpatchSelf() right after this
+        /// callback), so they deliberately are not unpatch-ed here.
+        /// </summary>
+        public override void OnDeinitializeMelon()
+        {
+            _deinitialized = true;
+
+            // Release the listening socket first: this is what unblocks a hot reload.
+            try
+            {
+                _server?.Stop();
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance?.Warning($"Error while stopping MCP server: {ex.Message}");
+            }
+            _server = null;
+
+            // Drop the static MelonLogger subscriptions. These are static events, so leaving them
+            // attached keeps a delegate pointing at this (now unloaded) assembly and prevents the
+            // AssemblyLoadContext from being collected.
+            try
+            {
+                MelonLogger.WarningCallbackHandler -= OnLogWarning;
+                MelonLogger.ErrorCallbackHandler -= OnLogError;
+                UnsubscribeMsgHandler();
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance?.Warning($"Error while unsubscribing log handlers: {ex.Message}");
+            }
+
+            UnityMainThreadDispatcher.Shutdown();
+
+            // Active field watches hold references to game objects from this load; drop them so the
+            // outgoing assembly is not kept alive and the new load does not inherit stale watches.
+            FieldWatcher.Reset();
+
+            lock (_logLock)
+            {
+                _logBuffer.Clear();
+            }
+
+            // Clear caches that hold reflected Types/PropertyInfos from this load.
+            _applicationTypeCache = null;
+            _runInBackgroundPropCache = null;
+            _gameManagerType = null;
+            _isPausedField = null;
+            _gameManagerCacheAttempted = false;
+            _hasEnabledRunInBackground = false;
+            _runInBackgroundCheckCounter = 0;
+
+            // Only clear the singleton if it still points at this instance; a newer load may have
+            // already installed its own plugin object.
+            if (ReferenceEquals(Instance, this))
+            {
+                Instance = null;
+            }
+
+            LoggerInstance?.Msg("MelonMCP Server stopped");
+        }
+
 
         private int GetConfiguredPort()
         {
@@ -88,21 +186,43 @@ namespace MelonMCP
             _server.RegisterTool(new ExecuteCSharpToolDefinition());
             _server.RegisterTool(new EvaluateExpressionToolDefinition());
 
-            // Unity inspection tools
+            // Unity inspection tools.
+            //
+            // find_game_object / list_components / inspect_component are DISABLED: under IL2CPP the
+            // component list collapses to UnityEngine.Component proxies, so list_components reports
+            // every component as "Component", inspect_component can never match a type name, and
+            // find_game_object's instanceId path returns nothing. Exposing them only produces
+            // misleading output, so they are not registered until the proxy collapse is fixed.
+            // The classes remain in UnityInspectionTools.cs for that repair.
             _server.RegisterTool(new GetSceneInfoToolDefinition());
             _server.RegisterTool(new ListGameObjectsToolDefinition());
+#if MELONMCP_ENABLE_BROKEN_INSPECTION_TOOLS
             _server.RegisterTool(new FindGameObjectToolDefinition());
             _server.RegisterTool(new ListComponentsToolDefinition());
             _server.RegisterTool(new InspectComponentToolDefinition());
+#endif
 
-            // MonoBehaviour control tools
+            // MonoBehaviour control tools - DISABLED for the same IL2CPP proxy-collapse reason as
+            // the inspection tools above: all three locate their target by matching
+            // component.GetType().Name, which never matches because every component reports as
+            // 'Component'. They therefore always answer "Component 'X' not found on GameObject".
+            // SetBehaviourEnabled would work if the component could be found, so these come back
+            // together with the inspection tools. Implementations are in MonoBehaviourControlTools.cs.
+#if MELONMCP_ENABLE_BROKEN_INSPECTION_TOOLS
             _server.RegisterTool(new ToggleBehaviourToolDefinition());
             _server.RegisterTool(new SetPropertyToolDefinition());
             _server.RegisterTool(new InvokeMethodToolDefinition());
+#endif
 
             // Game state tools
             _server.RegisterTool(new GetGameInfoToolDefinition());
+            // take_screenshot is DISABLED: CaptureScreenshot fails on this IL2CPP/CoreCLR runtime
+            // (Texture2D + ReadPixels path returns null before PNG encoding), so the tool could only
+            // ever answer 'screenshot API may not be available'. Implementation stays in
+            // GameStateTools.cs. Use execute_csharp for pixel/graphics inspection in the meantime.
+#if MELONMCP_ENABLE_BROKEN_SCREENSHOT
             _server.RegisterTool(new TakeScreenshotToolDefinition());
+#endif
             _server.RegisterTool(new GetTimeInfoToolDefinition());
 
             // Resource tools
@@ -110,7 +230,13 @@ namespace MelonMCP
             _server.RegisterTool(new ListTypesToolDefinition());
             _server.RegisterTool(new GetTypeInfoToolDefinition());
 
-            // Advanced tools
+            // Advanced tools.
+            //
+            // NOTE on the instanceId branch: instantiate_object / set_transform / destroy_object all
+            // work when addressed by 'path', but their 'instanceId' argument routes through
+            // UnityHelper.FindObjectByInstanceId, which depends on a non-generic FindObjectsOfType
+            // reflection lookup that resolves to null under IL2CPP. Passing instanceId therefore
+            // fails with 'GameObject not found'. The path form is unaffected.
             _server.RegisterTool(new FindObjectsOfTypeToolDefinition());
             _server.RegisterTool(new SetTimeScaleToolDefinition());
             _server.RegisterTool(new CursorControlToolDefinition());
@@ -118,7 +244,13 @@ namespace MelonMCP
             _server.RegisterTool(new InstantiateObjectToolDefinition());
             _server.RegisterTool(new CreatePrimitiveToolDefinition());
             _server.RegisterTool(new SetTransformToolDefinition());
+            // inspect_material is DISABLED: it resolves the renderer via
+            // UnityHelper.GetComponent(gameObject, "Renderer"), which is subject to the same IL2CPP
+            // proxy collapse and always answers 'No renderer found on GameObject'. The rest of this
+            // group works when addressed by path; only their instanceId branch is dead (see below).
+#if MELONMCP_ENABLE_BROKEN_INSPECTION_TOOLS
             _server.RegisterTool(new InspectMaterialToolDefinition());
+#endif
             _server.RegisterTool(new DestroyObjectToolDefinition());
 
             // Game knowledge tools
@@ -129,11 +261,26 @@ namespace MelonMCP
             _server.RegisterTool(new SearchPseudocodeToolDefinition());
             _server.RegisterTool(new ReadPseudocodeFileToolDefinition());
 
+            // Patch / hook debugging tools. These exist because "Harmony reported the patch applied"
+            // does not mean it will fire, and because on IL2CPP the runtime bytes differ from disk.
+            _server.RegisterTool(new HookPatchInfoToolDefinition());
+            _server.RegisterTool(new ListPatchesToolDefinition());
+            _server.RegisterTool(new DisasmToolDefinition());
+            _server.RegisterTool(new ReadMemToolDefinition());
+            _server.RegisterTool(new ResolveJumpToolDefinition());
+            _server.RegisterTool(new WatchFieldToolDefinition());
+            _server.RegisterTool(new UnwatchFieldToolDefinition());
+
             LoggerInstance.Msg($"Registered {_server.ToolCount} MCP tools");
         }
 
         public override void OnUpdate()
         {
+            // Once the melon is unloaded (hot reload, or shutdown) there is nothing left to pump.
+            // OnUpdate is driven by MelonLoader's own update loop, which may still tick this object
+            // briefly after Unregister; touching Unity here would resurrect state we just released.
+            if (_deinitialized) return;
+
             // Process queued actions on the main thread
             UnityMainThreadDispatcher.ProcessQueue();
 
@@ -147,6 +294,10 @@ namespace MelonMCP
                     EnsureRunInBackground();
                 }
             }
+
+            // Sample any active field watches. This has to happen on the main thread: the watches
+            // read game state, and the game is mutating it in this same loop.
+            FieldWatcher.Tick();
 
             // Continuously bypass GameManager pause (for games like TLD that pause on focus loss)
             EnsureNotPaused();
@@ -258,10 +409,15 @@ namespace MelonMCP
             }
         }
 
+        /// <summary>
+        /// Normal shutdown. MelonLoader runs OnDeinitializeMelon first, so by the time this fires the
+        /// server is usually already stopped; MCPServer.Stop() is idempotent, and the null-guard
+        /// below keeps this harmless either way.
+        /// </summary>
         public override void OnApplicationQuit()
         {
             _server?.Stop();
-            LoggerInstance.Msg("MelonMCP Server stopped");
+            LoggerInstance?.Msg("MelonMCP Server stopped");
         }
 
         #region Log Capture
@@ -292,6 +448,8 @@ namespace MelonMCP
                     {
                         var handler = Delegate.CreateDelegate(handlerType, this, method);
                         msgDrawingEvent.AddEventHandler(null, handler);
+                        _msgEvent = msgDrawingEvent;
+                        _msgHandler = handler;
                         LoggerInstance.Msg("Successfully subscribed to MsgDrawingCallbackHandler");
                     }
                 }
@@ -307,6 +465,8 @@ namespace MelonMCP
                             var handlerType = msgEvent.EventHandlerType;
                             var handler = Delegate.CreateDelegate(handlerType, this, method);
                             msgEvent.AddEventHandler(null, handler);
+                            _msgEvent = msgEvent;
+                            _msgHandler = handler;
                             LoggerInstance.Msg("Successfully subscribed to MsgCallbackHandler (deprecated)");
                         }
                     }
@@ -315,6 +475,30 @@ namespace MelonMCP
             catch (Exception ex)
             {
                 LoggerInstance.Warning($"Could not subscribe to Msg logs via reflection: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Removes the reflectively-subscribed Msg handler. The event and delegate were recorded by
+        /// SubscribeToAllLogEvents because the ConcreteDrawingCallbackHandler pair differs across
+        /// MelonLoader builds, so the correct one cannot be inferred at teardown time.
+        /// </summary>
+        private void UnsubscribeMsgHandler()
+        {
+            if (_msgEvent == null || _msgHandler == null) return;
+
+            try
+            {
+                _msgEvent.RemoveEventHandler(null, _msgHandler);
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance?.Warning($"Could not unsubscribe from Msg logs: {ex.Message}");
+            }
+            finally
+            {
+                _msgEvent = null;
+                _msgHandler = null;
             }
         }
 
@@ -384,10 +568,20 @@ namespace MelonMCP
     }
 
     /// <summary>
-    /// Harmony patch to prevent games from disabling runInBackground
-    /// This intercepts Application.set_runInBackground and blocks attempts to set it to false
+    /// Harmony patch that blocks the game from turning runInBackground off.
+    ///
+    /// NOTE: this class deliberately carries NO [HarmonyPatch] attribute. The target
+    /// (UnityEngine.Application.set_runInBackground) is resolved by reflection at runtime in
+    /// ApplyPatch(), because the method is not statically referenceable in the IL2CPP proxy set.
+    ///
+    /// Adding a bare [HarmonyPatch] here makes MelonLoader's automatic HarmonyInit → PatchAll scan
+    /// pick this class up and try to patch a method it cannot identify, which produces:
+    ///   HarmonyException: Patching exception in method null
+    ///    ---> ArgumentException: Undefined target method for patch method ...RunInBackgroundPatch::Prefix
+    /// The failure is harmless (nothing was patched either way) but it logs an ERROR at every start.
+    /// If this class ever needs to join automatic PatchAll, it must declare a concrete target via
+    /// [HarmonyPatch(typeof(X), "Method")] and mark the methods [HarmonyPrefix].
     /// </summary>
-    [HarmonyPatch]
     public static class RunInBackgroundPatch
     {
         private static bool _patchApplied = false;
