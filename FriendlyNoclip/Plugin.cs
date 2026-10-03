@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Text;
 using HarmonyLib;
 using Il2Cpp;
@@ -62,19 +63,28 @@ public class Plugin : MelonMod
     /// <summary>每个移动范围计算都 dump 全部网格（日志量大）。</summary>
     internal static MelonPreferences_Entry<bool> DumpAllGrids = null!;
 
-    /// <summary>原生级探针：读取过滤点机器码，确认签名与偏移。</summary>
-    internal static MelonPreferences_Entry<bool> NativeProbeEnabled = null!;
-
-    /// <summary>是否启用原地改写探针（会让敌我都能穿）。</summary>
-    internal static MelonPreferences_Entry<bool> NativePatchEnabled = null!;
-
+        // ← 2026-10-05 删除了 native_probe / native_patch_probe 两个开关
+        //   及对应的 NativeProbe / NativePatchProbe 类（结论已被取代）。
     /// <summary>原生 detour：只让**敌方**阻挡，友方可穿过。</summary>
     internal static MelonPreferences_Entry<bool> NativeDetourEnabled = null!;
+
+        // ← 2026-10-05 删除了 native_onenter_detour 开关及 NativeOnEnterDetour 类。
+        //   它在 OnEnter 原生入口装自建 stub，导致尾调用目标栈偏移错 0x30，一进战斗即崩。
+
+    /// <summary>
+    /// 「穿越不留痕」开关（验证中）。当前只开启**只读探测**，不修改游戏状态。
+    /// </summary>
+    internal static MelonPreferences_Entry<bool> FixOccupancy = null!;
 
     private HarmonyLib.Harmony? _harmony;
 
     internal static MelonLogger.Instance Log = null!;
 
+    /// <summary>OnLeave Prefix 命中次数（不受诊断开关门控）。</summary>
+    private static int _onLeaveHits;
+
+    /// <summary>EnterGrid Prefix 命中次数（不受诊断开关门控）。</summary>
+    private static int _enterGridHits;
     public override void OnInitializeMelon()
     {
         Log = LoggerInstance;
@@ -98,16 +108,10 @@ public class Plugin : MelonMod
             "dump_all_grids", false,
             "Dump 全部网格", "每次调用都输出整张地图的网格明细（极慢，排查时才开）。");
 
-        NativeProbeEnabled = Category.CreateEntry(
-            "native_probe", true,
-            "原生探针", "定位并校验原生过滤点（只读，不修改游戏代码）。");
+        // ← 2026-10-05 已删除：native_probe / native_patch_probe 两个旧探针。
+        //   它们的结论（「原生侧的阻挡判定无法从托管层绕过」）已被
+        //   native_detour + EnterGrid 修复这条路线取代，代码已无用途。
 
-        // 行为探针：原地等长 NOP 掉 Navigate 的「存活即阻挡」判定。
-        // 默认关闭 —— 它会让敌我都能穿，只是用来验证「原地改写不崩」。
-        NativePatchEnabled = Category.CreateEntry(
-            "native_patch_probe", false,
-            "原生原地改写（探针）",
-            "原地 NOP 掉寻路的阻挡判定。敌我都能穿，仅用于验证改动可行性。");
 
         // 原生 detour：真正的实现。用 Dobby 在 Navigate 内部装 detour，
         // 只把**敌方**单位当阻挡，友方可以穿过。
@@ -116,25 +120,30 @@ public class Plugin : MelonMod
             "原生 detour（只穿友方）",
             "在 MapNavigator.Navigate 内装 detour：友方格子可通过，敌方仍然阻挡。");
 
+        // ← 2026-10-05 已删除：native_onenter_detour。
+        //   它的思路（在 OnEnter 原生入口装 detour 写回原主）已被证伪：
+        //   自建的 stub 帧让 OnEnter 的尾调用目标 0x180870420 从错位 0x30 的栈
+        //   偏移恢复 xmm6/r15/r14，跳入垃圾地址 —— 一进战斗就崩。
+        //   现在的实现走 BattleUnit.EnterGrid 的 Harmony Prefix/Postfix，
+        //   完全在托管层，不需要任何原地改写。
+
+
+        // ★★ 「穿越不留痕」的正确落点（验证中）。
+        // 见 BattleUnit_EnterGrid_Prefix 的注释：EnterGrid 是 6 个调用点的唯一汇聚处，
+        // 且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
+        FixOccupancy = Category.CreateEntry(
+            "fix_occupancy", false,
+            "穿越不留痕（写回原主登记）",
+            "路过友方格子后把被覆盖的原主登记写回。");
         _harmony = new HarmonyLib.Harmony(HarmonyId);
 
-        if (NativeProbeEnabled.Value)
-        {
-            NativeProbe.Verify();
-        }
+        // 原生探针/原地改写探针已于 2026-10-05 删除（结论已被取代）。
 
-        // 原地等长改写：先做可行性验证（不分配、不跳转）。
-        // 与 NativeDetour 互斥 —— 两者改的是同一个地址，
-        // 谁先装谁赢，另一方会因字节校验失败而拒绝。见下方 detour 分支。
-        if (NativePatchEnabled.Value && !NativeDetourEnabled.Value)
-        {
-            NativePatchProbe.Install();
-        }
+        // 原地等长改写探针已于 2026-10-05 删除。
 
         // 正式的只穿友方实现：Dobby detour + 手写 stub。
         if (NativeDetourEnabled.Value)
         {
-            if (NativePatchEnabled.Value)
             {
                 LoggerInstance.Warning(
                     "native_patch_probe 与 native_detour 同时开启：两者改写同一地址，已跳过原地改写探针，只装 detour。");
@@ -175,25 +184,38 @@ public class Plugin : MelonMod
             nameof(GridUnitData_OnLeave_Prefix),
             parameterCount: 0);
 
-        // ★★ 「穿越友方」的正式实现：OnEnter 的**原生入口** detour。
+        // ★★ 「穿越不留痕」的真正修复点：OnLeave 的 **Postfix**。
+        // 必须在 Postfix 而非 Prefix —— OnLeave 原函数第一条指令就把 [grid+0x18] 清 0，
+        // Prefix 里的写回会被它立刻抹掉（实测日志 15:52:42 已完整演示）。
+        patched += TryPatch(
+            nameof(GridUnitData), "OnLeave",
+            nameof(GridUnitData_OnLeave_Postfix),
+            parameterCount: 0);
+
+        // ★★ 「穿越不留痕」的探测：EnterGrid 是 BattleUnit 的**唯一**移动入口。
         //
-        // 不能再用 Harmony：实测 Harmony 绑定的是 Il2CppInterop 的托管 DMD 包装
-        // （日志 IL=6fff97ab04b8，与 OnLeave 的 6fff97ab04c0 同区），
-        // 而 BattleUnit.EnterGrid 里是一条 `call 0x180873b20` 直达函数体
-        // （全镜像唯一调用点），**不经过 DMD 包装** → Harmony 补丁在真实移动中零触发。
+        // 已核实（objdump，`0x1808d12d0`）的 6 个调用点全部在托管方法/状态机里：
+        //   RegretMove(+0x68) / EnterBattleField(+0x385, +0x5b1) /
+        //   <HeroEnterGridDelay>d__253.MoveNext(+0xaf) /
+        //   <MoveFromTarget>d__90.MoveNext(+0x47c) /
+        //   <PlayBattleUnitMove>d__273.MoveNext(+0x2f9)
+        // 全部经托管路径 → 按本项目规律（经托管代理的补丁能触发）应当能挂上。
         //
-        // 判据：调用者是 native 还是 managed。BattleGridClicked 等由托管侧调用的方法
-        // 走 DMD，所以那些 Harmony 补丁正常；OnEnter 由 native 调用，必须 native hook。
-        if (NativeDetourEnabled.Value)
-        {
-            NativeOnEnterDetour.Install();
-        }
+        // 为什么是 EnterGrid 而不是 OnEnter：EnterGrid(unit, targetGrid, ...) 的
+        // 两个参数就足以判定穿越 —— 只要 `targetGrid.battleUnit` 非空且 != unit，
+        // 那就是要覆盖一个合法的原主。而 OnEnter(grid, unit) 缺「谁在移动」的上下文，
+        // 才被迫引入旁表（而旁表需要跟踪战斗开始/结束/死亡/撤销，复杂度不划算）。
+        patched += TryPatchPrefix(
+            nameof(BattleUnit), "EnterGrid",
+            nameof(BattleUnit_EnterGrid_Prefix),
+            parameterCount: 3);
+        // ★★ 「穿越不留痕」的实现已移到 BattleUnit.EnterGrid 的 Prefix/Postfix
+        //   与 GridUnitData.OnLeave 的 Postfix（纯托管层），
+        //   不再需要任何 native detour —— 详见下方 TryPatch 调用处的注释。
 
         LoggerInstance.Msg(
             $"FriendlyNoclip 初始化完成：挂载 {patched} 个补丁" +
-            $"，原地改写探针={(NativePatchProbe.Installed ? "已启用" : "未启用")}" +
-            $"，Navigate detour={(NativeDetour.Installed ? "已启用" : "未启用")}" +
-            $"，OnEnter detour={(NativeOnEnterDetour.Installed ? "已启用" : "未启用")}。");
+            $"，Navigate detour={(NativeDetour.Installed ? "已启用" : "未启用")}。");
     }
 
 
@@ -201,8 +223,6 @@ public class Plugin : MelonMod
     {
         // 先还原原生改写，再摘 Harmony 补丁。
         NativeDetour.Uninstall();
-        NativeOnEnterDetour.Uninstall();
-        NativePatchProbe.Uninstall();
         _harmony?.UnpatchSelf();
         _harmony = null;
         LoggerInstance.Msg("FriendlyNoclip 已卸载补丁。");
@@ -292,6 +312,60 @@ public class Plugin : MelonMod
         return parts.Count == 0 ? "（无）" : string.Join(" | ", parts);
     }
 
+    /// <summary>
+    /// 查 Harmony 为某个目标方法实际选中的 <c>MethodPatcher</c> 是不是
+    /// <c>Il2CppDetourMethodPatcher</c>，以及它的 <c>IsValid</c>。
+    ///
+    /// <para>
+    /// 【为什么要这个】<c>Il2CppDetourMethodPatcher</c> 是 <c>internal</c>，<c>IsValid</c>
+    /// 也是 <c>internal</c>，编译期拿不到。但“Harmony 到底有没有把原生 detour 装上”
+    /// 是本次调查的<b>核心未知数</b>，不能靠读源码推断 —— 必须运行时量出来。
+    /// </para>
+    /// <para>
+    /// <c>TryResolve</c> 只在 <c>IsValid == true</c> 时才赋值 <c>args.MethodPatcher</c>，
+    /// 所以：类型是 <c>Il2CppDetourMethodPatcher</c> ⇒ 原生 detour 已装（补丁应触发）；
+    /// 类型是默认的 <c>MethodPatcher</c> ⇒ 静默回退到托管 IL 补丁（原生调用碰不到）。
+    /// </para>
+    /// </summary>
+    private static string DescribePatcher(MethodBase target)
+    {
+        try
+        {
+            Type? pm = AccessTools.TypeByName("HarmonyLib.Public.Patching.PatchManager");
+            MethodInfo? get = pm?.GetMethod(
+                "GetMethodPatcher",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { typeof(MethodBase) },
+                null);
+
+            object? patcher = get?.Invoke(null, new object[] { target });
+
+            if (patcher == null)
+            {
+                return "GetMethodPatcher 返回 null";
+            }
+
+            Type pt = patcher.GetType();
+            string name = pt.Name;
+
+            // IsValid 是 internal 属性，显式声明在 Il2CppDetourMethodPatcher 自身上。
+            PropertyInfo? isValid = pt.GetProperty(
+                "IsValid",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+            string valid = isValid == null
+                ? "（该类型无 IsValid）"
+                : $"IsValid={isValid.GetValue(patcher)}";
+
+            return $"{name} [{valid}]";
+        }
+        catch (Exception e)
+        {
+            return $"探测失败：{e.GetType().Name}: {e.Message}";
+        }
+    }
+
     private int TryPatch(
         string targetTypeName,
         string targetMethodName,
@@ -328,7 +402,8 @@ public class Plugin : MelonMod
             // ★ 打印真实绑定的签名 —— "挂载成功"从此是可核对的断言，而不是布尔值。
             LoggerInstance.Msg(
                 $"已挂载补丁：{targetTypeName}.{DescribeOverloads(new[] { target }, targetMethodName)} " +
-                $"(IL={target.MethodHandle.GetFunctionPointer().ToInt64():x}) -> {patchName}");
+                $"(IL={target.MethodHandle.GetFunctionPointer().ToInt64():x}) -> {patchName} " +
+                $"| patcher={DescribePatcher(target)}");
             return 1;
         }
         catch (Exception e)
@@ -374,7 +449,8 @@ public class Plugin : MelonMod
 
             LoggerInstance.Msg(
                 $"已挂载前缀补丁：{targetTypeName}.{DescribeOverloads(new[] { target }, targetMethodName)} " +
-                $"(IL={target.MethodHandle.GetFunctionPointer().ToInt64():x}) -> {patchName}");
+                $"(IL={target.MethodHandle.GetFunctionPointer().ToInt64():x}) -> {patchName} " +
+                $"| patcher={DescribePatcher(target)}");
             return 1;
         }
         catch (Exception e)
@@ -418,10 +494,24 @@ public class Plugin : MelonMod
     {
         try
         {
+            // ★ 无条件计数：不受 Diagnostics 门控。
+            // 目的：把「补丁零触发」与「诊断开关没开」彻底分开 ——
+            // 之前用零条 [登记] 行推断补丁没触发，但那些行本身是被门控的，
+            // 所以那个推断不成立。这个计数器不带任何门控。
+            int n = Interlocked.Increment(ref _onLeaveHits);
+
+            if (n <= 20)
+            {
+                Log.Msg($"[命中] OnLeave 第 {n} 次被调用");
+            }
+
             if (__instance == null)
             {
                 return;
             }
+
+            // ★★ 「穿越不留痕」修复在 **Postfix** 里做，不在 Prefix —— 见
+            //    GridUnitData_OnLeave_Postfix 的注释（Prefix 的写回会被原函数立刻抹掉）。
 
             if (Diagnostics.Value)
             {
@@ -433,6 +523,354 @@ public class Plugin : MelonMod
             Log.Warning($"[登记] OnLeave 探针异常：{e.Message}");
         }
     }
+
+    /// <summary>
+    /// <c>GridUnitData.OnLeave()</c> 的 Postfix —— 「穿越不留痕」的真正修复点。
+    ///
+    /// <para>
+    /// 【为什么必须是 Postfix】<c>OnLeave</c> 原函数的**第一条指令**就是
+    /// <c>[grid+0x18] = 0</c>（见 objdump <c>0x180873b60</c>）。所以任何在 Prefix 里的
+    /// 写回都会被它立刻抹掉 —— 实测日志 15:52:42.828 完整演示了这个失败：
+    /// <code>
+    /// [修复·登记] ★已写回 (r9,c0) 原主 ptr=0x13439f6c0      ← Prefix 写进去了
+    /// [登记] OnLeave 格(r9,c0) 改前=...ptr=0x13439f6c0     ← 原函数读到的确实是我写的值
+    ///                                                     ↑ 但它紧接着就写 0
+    /// </code>
+    /// 点击时读到的仍然是 <c>battleUnit=null</c>。
+    /// </para>
+    ///
+    /// <para>
+    /// 【Postfix 的时机】原函数完整跑完（清空 + 撤特效 + 发通知）之后才执行，
+    /// 所以这里的写回不会再被覆盖，同时又不干扰游戏自己的清理逻辑 —— 符合
+    /// 「不破坏 AI 占位与行为」的约束。
+    /// </para>
+    /// </summary>
+    internal static void GridUnitData_OnLeave_Postfix(GridUnitData __instance)
+    {
+        try
+        {
+            if (__instance == null || !FixOccupancy.Value)
+            {
+                return;
+            }
+
+            RepairCoveredOccupant(__instance);
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[修复·登记] OnLeave Postfix 异常：{e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// <c>BattleUnit.EnterGrid(GridUnitData, bool, bool)</c> 的 Prefix ——
+    /// 「穿越不留痕」的**只读探测**。不修改任何游戏状态。
+    ///
+    /// <para>
+    /// 【为什么选这个落点】<c>EnterGrid</c> 是单位移动的**唯一**入口：全镜像 6 个调用点
+    /// （<c>RegretMove</c>/<c>EnterBattleField</c>×2/<c>HeroEnterGridDelay</c>/<c>MoveFromTarget</c>/
+    /// <c>PlayBattleUnitMove</c>）全部汇到这里。它同时拿到 <c>__instance</c>（移动者）、
+    /// <paramref name="grid"/>（目标格），而判定「这是穿越」所需的全部信息恰好就是这两个：
+    /// <b>目标格上已有别的单位</b> = 将要覆盖一个合法的原主。
+    /// </para>
+    ///
+    /// <para>
+    /// 【与 OnEnter/OnLeave 的关系】<c>OnEnter(grid, unit)</c> 拿不到「谁在移动」，
+    /// <c>OnLeave()</c> 更是只有一个格子参数 —— 两者都缺上下文，所以只能靠旁表，
+    /// 而旁表必须跟踪战斗开始/结束/死亡/撤销才能不失步，复杂度不划算。
+    /// <c>EnterGrid</c> 直接消除了这个需求。
+    /// </para>
+    ///
+    /// <para>
+    /// 【本探测要回答的两个问题】
+    /// <list type="number">
+    ///   <item>这个补丁到底触不触发？（与 <c>OnEnter</c>/<c>OnLeave</c> 同源的疑问：
+    ///         两者都只在原生路径上被调用，补丁行为不一致。）</item>
+    ///   <item>穿越现场的真实字段组合是什么？能否用
+    ///         <c>grid.battleUnit != null &amp;&amp; grid.battleUnit != __instance</c>
+    ///         干净地区分「穿越」与「正常进入空格」？</item>
+    /// </list>
+    /// </para>
+    /// </summary>
+    internal static void BattleUnit_EnterGrid_Prefix(
+        BattleUnit __instance,
+        GridUnitData grid,
+        bool noTurnRotation,
+        bool teleport)
+    {
+        try
+        {
+            // ★ 无条件计数：不受 Diagnostics 门控（与 OnLeave 探针同理）。
+            int n = Interlocked.Increment(ref _enterGridHits);
+
+            if (n <= 40)
+            {
+                Log.Msg($"[命中·EnterGrid] 第 {n} 次被调用");
+            }
+
+            if (__instance == null || grid == null)
+            {
+                return;
+            }
+
+            BattleUnit? occupant;
+
+            try
+            {
+                occupant = grid.battleUnit;
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"[穿越] 读 grid.battleUnit 失败：{e.Message}");
+                return;
+            }
+
+            int row, col;
+
+            try
+            {
+                row = grid.row;
+                col = grid.column;
+            }
+            catch (Exception)
+            {
+                row = col = -9999;
+            }
+
+            // 移动者自己认为它站在哪 —— 用来核对「先摘旧、再挂新」的成对性。
+            string selfPos;
+
+            try
+            {
+                GridUnitData? mg = __instance.mapGrid;
+                selfPos = mg == null
+                    ? "null"
+                    : $"(r{mg.row},c{mg.column})";
+            }
+            catch (Exception)
+            {
+                selfPos = "读取失败";
+            }
+
+            // 占用者自己的 mapGrid 指向哪 —— 穿越受害者的特征是
+            // 「mapGrid 正指向被穿的那格」（它没动过，是被覆盖的）。
+            string occPos = "-";
+            bool isTraversal = false;
+
+            if (occupant != null)
+            {
+                try
+                {
+                    GridUnitData? omg = occupant.mapGrid;
+                    occPos = omg == null
+                        ? "null"
+                        : $"(r{omg.row},c{omg.column})";
+
+                    // ★ 判据（已由实测日志 15:21:31 坐实）：目标格上已有单位，
+                    //   且不是移动者自己 → 这就是要覆盖一个合法原主。
+                    //   实测中每个 ★穿越 的占用者 mapGrid 都精确指向被穿的那一格。
+                    isTraversal = occupant.Pointer != __instance.Pointer;
+
+                    // 记下「即将被覆盖的原主」，交给紧随其后的 OnLeave 写回。
+                    if (isTraversal && FixOccupancy.Value)
+                    {
+                        RecordPendingRepair(
+                            grid, occupant, __instance, row, col);
+                    }
+                }
+                catch (Exception e)
+                {
+                    occPos = $"读取失败：{e.Message}";
+                }
+            }
+
+            Log.Msg(
+                $"[穿越] EnterGrid {(isTraversal ? "★穿越" : "普通")} " +
+                $"目标格(r{row},c{col}) mapID={SafeMapId(grid)} | " +
+                $"移动者 ptr=0x{__instance.Pointer.ToInt64():x} 队伍={ReadTeamId(__instance)} 原位置={selfPos} | " +
+                $"占用={(occupant == null ? "空" : $"ptr=0x{occupant.Pointer.ToInt64():x} 队伍={ReadTeamId(occupant)} mapGrid={occPos}")} | " +
+                $"noTurnRotation={noTurnRotation} teleport={teleport}");
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[穿越] EnterGrid 探针异常：{e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 记下即将被穿越覆盖的原主，等下一次 <c>OnLeave</c> 把它写回。
+    /// 只在 <see cref="FixOccupancy"/> 开启时被调用。
+    /// </summary>
+    private static void RecordPendingRepair(
+        GridUnitData grid,
+        BattleUnit occupant,
+        BattleUnit mover,
+        int row,
+        int col)
+    {
+        try
+        {
+            lock (_pendingLock)
+            {
+                // 上限保护：正常移动最多同时 1～2 条，超出说明有异常路径。
+                if (_pendingRepairs.Count >= MaxPendingRepairs)
+                {
+                    _pendingRepairs.Clear();
+                }
+
+                _pendingRepairs[grid.Pointer] = new PendingRepair
+                {
+                    Grid = grid.Pointer,
+                    Occupant = occupant.Pointer,
+                    Mover = mover.Pointer,
+                    Row = row,
+                    Col = col,
+                };
+            }
+
+            Log.Msg(
+                $"[修复·登记] 记录待恢复：格(r{row},c{col}) " +
+                $"原主 ptr=0x{occupant.Pointer.ToInt64():x}（被穿越者 0x{mover.Pointer.ToInt64():x} 覆盖）");
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[修复·登记] 记录失败：{e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 在 <c>OnLeave(grid)</c> 把本格清空**之前**，把上一步被覆盖的合法原主写回。
+    ///
+    /// <para>
+    /// 【为什么安全】只有当本格当前登记的是当初的穿越者（而不是原主、也不是空）时
+    /// 才写回 —— 这恰好确认了「本格现在被穿越者占着，而原主才是合法主人」。
+    /// 其余一切情况（真离开、空格、别的单位）都原样放行，不干预游戏的正常运行。
+    /// </para>
+    /// </summary>
+    private static void RepairCoveredOccupant(GridUnitData grid)
+    {
+        try
+        {
+            PendingRepair? pending;
+
+            lock (_pendingLock)
+            {
+                if (!_pendingRepairs.TryGetValue(grid.Pointer, out pending))
+                {
+                    return;
+                }
+
+                // 无论后续是否真的写回，这条记录都已消费。
+                _pendingRepairs.Remove(grid.Pointer);
+            }
+
+            if (pending == null)
+            {
+                return;
+            }
+
+            // ★ 判据修正（2026-10-05）：不再看「本格当前是不是穿越者」。
+            //
+            // OnLeave 的语义就是「离开」，它原函数第一条指令必定把本格清空，
+            // 所以 Postfix 里读到的 current 天然是 null。实测日志 18:04:58 完整
+            // 演示了这一点：
+            //   [穿越] EnterGrid ★穿越 目标格(r7,c0) 占用 mapGrid=(r7,c0)
+            //   [修复·登记] 跳过 (r7,c0)：本格当前=空，不是当初的穿越者
+            // —— 旧条件把每一次修复都跳过了。
+            //
+            // 真实判据：要看**原主自己**是否仍然认为它在本格。
+            // 若原主 alive 且它的 mapGrid 仍指回本格，说明它从未搬走，
+            // 只是登记被人踩掉了 —— 这才是该写回的情形。
+            BattleUnit? current = grid.battleUnit;
+
+            if (current != null && current.Pointer != pending.Mover)
+            {
+                // 本格已被别的单位占用，现场与记录不符，不插手。
+                Log.Msg(
+                    $"[修复·登记] 跳过 (r{pending.Row},c{pending.Col})：" +
+                    $"本格当前被 ptr=0x{current.Pointer.ToInt64():x} 占用。");
+                return;
+            }
+            BattleUnit? original = WrapUnit(pending.Occupant);
+
+            if (original == null)
+            {
+                Log.Warning(
+                    $"[修复·登记] 无法还原原主 ptr=0x{pending.Occupant.ToInt64():x}"
+                    + $"（格(r{pending.Row},c{pending.Col})），跳过。");
+                return;
+            }
+
+            // ★ 关键安全阀：原主必须**仍然认为自己在本格**。
+            // 否则说明它是真的搬走了（正常离开），而不是被穿越踩掉登记 ——
+            // 那种情况绝对不能写回，否则会在空格上凭空造出一个占位。
+            if (!IsAliveSafe(original))
+            {
+                return;
+            }
+
+            try
+            {
+                GridUnitData? omg = original.mapGrid;
+
+                if (omg == null || omg.Pointer != pending.Grid)
+                {
+                    Log.Msg(
+                        $"[修复·登记] 跳过 (r{pending.Row},c{pending.Col})：" +
+                        $"原主 0x{original.Pointer.ToInt64():x} 的 mapGrid=" +
+                        (omg == null
+                            ? "null"
+                            : $"(r{omg.row},c{omg.column})") +
+                        $"，已不指向本格（它是真的离开了）。");
+                    return;
+                }
+            }
+            catch (Exception e)
+            {
+                Log.Warning($"[修复·登记] 读原主 mapGrid 失败：{e.Message}");
+                return;
+            }
+
+            // ★ 真正的修复：把合法原主写回本格。
+            // battleUnit 的 setter 带 GC write barrier，托管层写入是安全的。
+            grid.battleUnit = original;
+
+            Log.Msg(
+                $"[修复·登记] ★已写回 (r{pending.Row},c{pending.Col}) " +
+                $"原主 ptr=0x{original.Pointer.ToInt64():x} 队伍={ReadTeamId(original)} " +
+                $"（此前被穿越者 0x{pending.Mover.ToInt64():x} 覆盖）");
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[修复·登记] 写回异常：{e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 待恢复的占位：<c>EnterGrid</c> 即将覆盖的合法原主。
+    ///
+    /// <para>
+    /// 【生命周期】一条记录只活「一次 EnterGrid Prefix」到「紧随其后的 OnLeave」之间，
+    /// 被消费后立即移除。**没有跨战斗、跨回合的残留** —— 这正是它不需要跟踪
+    /// 战斗开始/结束/死亡/撤销的原因（旁表方案就是死在这里）。
+    /// </para>
+    /// </summary>
+    private sealed class PendingRepair
+    {
+        internal IntPtr Grid;
+        internal IntPtr Occupant;
+        internal IntPtr Mover;
+        internal int Row;
+        internal int Col;
+    }
+
+    private static readonly object _pendingLock = new();
+
+    /// <summary>格指针 → 待恢复记录（最多同时 1～2 条）。</summary>
+    private static readonly Dictionary<IntPtr, PendingRepair> _pendingRepairs = new();
+
+    /// <summary>剩余待恢复条数上限 —— 防止异常情况下无限增长。</summary>
+    private const int MaxPendingRepairs = 8;
 
     /// <summary>
 
@@ -525,7 +963,7 @@ public class Plugin : MelonMod
         Log.Msg(
             $"[登记] {op} 格(r{row},c{col}) mapID={SafeMapId(grid)} | " +
             $"改前={before} | 写入={(unit == null ? "null" : $"队伍={ReadTeamId(unit)},ptr=0x{unit.Pointer.ToInt64():x}")} | " +
-            $"{self} | 调用者={CallerReturnAddress()}");
+            $"{self}");
 
         // 只有"清掉一个原本有人的格子"才是我们要找的元凶 —— 高亮它。
         try
@@ -559,62 +997,10 @@ public class Plugin : MelonMod
         }
     }
 
-    /// <summary>
-    /// 取调用者的返回地址。
-    ///
-    /// <para>
-    /// 用 <see cref="System.Diagnostics.StackTrace"/> 且**跳过本 mod 的帧**，
-    /// 这样拿到的就是游戏代码里的地址；再减去模块基址即得 RVA，
-    /// 可与 `script.json` 的调用点表直接比对（本项目的 VAs 都是静态 VA，
-    /// 故用 <c>rva + 0x180000000</c> 去对照）。
-    /// </para>
-    /// </summary>
-    private static string CallerReturnAddress()
-    {
-        try
-        {
-            var st = new System.Diagnostics.StackTrace(0, false);
-            var sb = new System.Text.StringBuilder();
-
-            int shown = 0;
-
-            for (int i = 0; i < st.FrameCount && shown < 3; i++)
-            {
-                System.Diagnostics.StackFrame? f = st.GetFrame(i);
-
-                if (f == null)
-                {
-                    continue;
-                }
-
-                MethodBase? m = f.GetMethod();
-
-                if (m == null)
-                {
-                    continue;
-                }
-
-                // 跳过本 mod 自己的帧。
-                if (m.DeclaringType != null &&
-                    m.DeclaringType.Namespace == "Unnamed42.FriendlyNoclip")
-                {
-                    continue;
-                }
-
-                sb.Append(
-                    $"#{shown} {m.DeclaringType?.Name}.{m.Name}" +
-                    $"(IL=0x{f.GetILOffset():x}) ");
-
-                shown++;
-            }
-
-            return shown == 0 ? "未知" : sb.ToString().TrimEnd();
-        }
-        catch (Exception e)
-        {
-            return $"取栈失败:{e.Message}";
-        }
-    }
+    // ← 2026-10-05 删除了 CallerReturnAddress()。
+    //   IL2CPP 下 StackTrace 只能看到 DMD 包装与 il2cpp_runtime_invoke 的帧，
+    //   拿不到游戏侧调用者（实测输出恒为 `#0 .DMD<...OnLeave> #1 .(il2cpp -> managed)
+    //   #2 IL2CPP.il2cpp_runtime_invoke`），对定位无帮助。
 
     // ------------------------------------------------------------------
     // 探针 1：GetMoveRangeGrids Postfix
