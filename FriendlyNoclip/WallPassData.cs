@@ -69,6 +69,26 @@ internal static class WallPassData
     private const int OffObstacleTeam = 0x2C;
 
     /// <summary>
+    /// <c>ObstacleData.obstacleHp</c>（float32）的偏移。
+    ///
+    /// <para>
+    /// 【为什么要看它】城墙被击毁后，游戏**不会**把 <c>obstale</c> 置 null，
+    /// 也不同步改 <c>obstalceType</c>（仍是 <c>Wall</c>）——
+    /// 它只把格子改成 <c>Normal</c> 并把 <c>hp</c> 打到负数。
+    /// 实机实测（2026-10，城墙被轰毁）：
+    /// </para>
+    /// <code>
+    /// (15,13) gridType=Normal passes=15 obstale=Wall hp=-5.1   ← 已毁，实为空地
+    /// (14,13) gridType=Obstacle passes=15 obstale=Wall hp=260  ← 完好
+    /// </code>
+    /// <para>
+    /// 所以判「这还是一面墙吗」必须连 <c>hp &gt; 0</c> 一起看，
+    /// 否则会把已毁的城墙当成完好城墙拦下。
+    /// </para>
+    /// </summary>
+    private const int OffObstacleHp = 0x24;
+
+    /// <summary>
     /// <c>ObstacleType.Wall</c>。
     ///
     /// <para>
@@ -239,6 +259,18 @@ internal static class WallPassData
             if (Marshal.ReadInt32(obstaclePtr + OffObstacleType) != ObstacleTypeWall)
             {
                 return false;
+            }
+            // ★ 还必须确认这面墙**仍然存在**。
+            //
+            // 城墙被击毁后，游戏只把 gridType 改成 Normal、把 hp 打到负数，
+            // 并**不**清 obstale、也**不**改 obstalceType —— 所以单看类型会把
+            // 「废墟」当成完好城墙。实测 (15,13)/(17,13) 就是 hp<0 的废墟。
+            float hp = BitConverter.ToSingle(
+                BitConverter.GetBytes(Marshal.ReadInt32(obstaclePtr + OffObstacleHp)), 0);
+
+            if (!(hp > 0f))
+            {
+                return false;   // 已毁（hp<=0）或读异常：当作不是墙 -> 放行
             }
 
             teamID = Marshal.ReadInt32(obstaclePtr + OffObstacleTeam);
