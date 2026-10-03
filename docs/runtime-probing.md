@@ -229,7 +229,7 @@ c3                    ret
 |---|---|---|
 | `hook_patch_info` 的 `hitCount` | 「补丁挂上了，但到底触发了几次」 | ❌ **在 IL2CPP 下做不了，已否决** —— 理由见下方。它同时否决了 `count_calls` |
 | `count_calls` | 不写代码就能数某函数被调用了几次 | ❌ 同上，同一个难点 |
-| `heap_objects` | 枚举某类型的**活对象** | `Il2CppObjectPool` **只是缓存，不是堆**；真正的路径是 `il2cpp_gc_heap_foreach`，需要额外导出 |
+| `heap_objects` | 枚举某类型的**活对象** | ⚠️ **导出确实存在且能跑，但回调会爆栈 — 已实测踩坑，见下方** |
 
 #### ⚠️ 为什么 `hitCount` 在 IL2CPP 下做不了（已验证，别再试）
 
@@ -292,10 +292,67 @@ _enterGridHits = 386
 （REPL 里的轻量断点）、`stack_trace_native`（MelonLoader 0.7 有 `NativeStackWalk`，
 但 Windows-only 且首次要下 PDB，Proton 下行为待验证）、`register_dump`
 （等价于 gdb 的 `info registers` + `x/4i $pc`）。
-> 💡 这三个缺口里，**`heap_objects` 是唯一值得考虑的**：它有明确的技术路径
-> （数出 `il2cpp_gc_heap_foreach` 的导出）且不自指。另外两个已否决。
->
-> 至于 `hitCount`：它当初被标为「最值得补」，是因为当时只看了「它对应哪个痛点」
-> 而没验证「它在 IL2CPP 下能否成立」。**这个判断是错的**，已在上文纠正。
+#### ⚠️ `heap_objects` 实测记录：导出能用，但回调会爆栈
+
+本轮在活进程里真试了。结论分两半，**两半都有用**。
+
+**先说好消息（你的疑问的答案）：C++ `new` 的东西能不能搜到？**
+
+→ **IL2CPP 下没有「C++ new 出来的托管对象」这回事。** C# 的 `class` 编译后就是一个
+`Il2CppObject`，由 IL2CPP 的 GC 分配 —— **「C++ new」与「托管堆」是同一条分配路径**。
+所以 GC 堆遍历当然能扫到它们。真正搜不到的是**纯原生内存**（IL2CPP 运行时的 malloc/STL、
+Unity 引擎侧的原生对象），那些不是 `Il2CppObject`，永远不会出现在遍历里。
+
+**导出确实存在且能跑**（实测）：
+
+```
+objdump -p GameAssembly.dll | grep il2cpp_gc_foreach_heap
+  [ 110] +base[ 111]  006e il2cpp_gc_foreach_heap      # 注意名字顺序
+```
+
+> ⚠️ 我之前写的 `il2cpp_gc_heap_foreach` **是错的**，正确的是 **`il2cpp_gc_foreach_heap`**
+> （foreach 在前）。按错误名字找会得 0 命中，然后误以为「IL2CPP 没导出」。
+> 另：`Il2CppInterop.Runtime` **没有**绑定它（`strings` 搜不到），必须自己 P/Invoke / GetExport。
+
+实测结果（`MiniDumpNormal` 之外，直接调）：
+
+| 项 | 值 |
+|---|---|
+| 遍历到的对象数 | **3169 个** |
+| `il2cpp_gc_get_used_size()` | **343109632**（343 MB） |
+| 单次遍历耗时 | **86 ms** |
+
+回调可用 `Marshal.GetFunctionPointerForDelegate` 传。
+
+**再说坏消息：按类型名筛选会爆栈。**
+
+我想在回调里用 `IL2CPP.il2cpp_object_get_class` + `il2cpp_class_get_name_` 拿类型名，
+通过反射调用（因为 `Il2CppInterop` 的那两个方法在热循环里）。
+结果：**主线程栈溢出，游戏直接死**。
+
+事后用刚建好的 minidump 工具确认（`crash_1791052641.dmp`）：
+
+```
+主线程栈: 82.4 KiB used / 82.4 KiB total    ← 一点不剩，rsp 已在栈底
+```
+
+根因：**这个回调跑在 GC 的栈上，不是普通托管线程的栈**。在回调里做任何重活
+（反射、字符串分配、甚至只是调几个托管方法）都会把那个栈压穿。
+
+**所以 `heap_objects` 的正确形状是：**
+
+- ✅ 回调用**纯原生代码**（预先取好函数指针，不要反射、不分配）
+- ✅ **过滤条件也必须是原生侧比较**（比如直接比较 `klass` 指针，而不是比字符串）
+- ⚠️ 遍历本身很快（86 ms / 3169 对象），但**不要在回调里做任何非平凡的事**
+- ❌ **不要在回调里调用托管方法** —— 包括看起来无害的 `IPAddress` / `string`
+
+> 💡 这次踩坑本身有价值：它同时证明了 §7.4 的 minidump 链路
+> （采集 → 。pdata 回溯 → 栈用量分析）**在真实崩溃上是好用的** —— 上一次
+> 只能拿到 `FailFast` 的假栈，这次是真正由自己的代码造成的崩溃，而且
+> **从栈用量一眼就能读出根因**。
+
+> 💡 也再次验证了一条老纪律：**先探测能力边界，再写工具**。
+> 本轮真正的产出不是 `heap_objects`，而是「IL2CPP 下 C++ new 与托管堆是同一回事」
+> 这个认知，以及一个可复用的爆栈教训。
 
 ---
