@@ -820,6 +820,52 @@ Navigate((5,12) -> (5,13)) = ok len=1 searched=1     ← 起点是空地，搜�
 | 4 | 「穿越不留痕」的时序验证 | `OnLeave` 在**离开**时触发，而覆盖发生在 **`OnEnter`** 时刻。若游戏在两格之间做了别的读取（如渲染），修复可能**太晚**。判据：若出现「中途闪一下被穿单位的模型消失」，说明太晚 → 需转「手写 `OnEnter` 替代实现」 |
 | 5 | 箭塔/战鼓/分舵是否会被误穿 | 实测它们是**普通 `BattleUnit`**（`g.obstale == null`），归「穿友方」那条线按队伍处理。**当前无异常**，但守城战里需再看一眼 |
 
+### 8.1 城墙穿越崩溃（2026-10-04，未结案）
+
+**现象**：`passes` 已正确写入（日志 `已放行 22 面己方城墙`），随后战斗崩溃。
+
+**崩溃现场**（`tools/il2cpp_unwind.py` 分析 `crash_1791043849.dmp`）：
+
+```
+exception : none recorded        <- FailFast/abort，不是野指针
+#0        <ntdll.dll+0xEA94>    <- Wine 的 syscall 跳板，不是崩溃点
+#9        BattleController::RunBattle+0x17C3
+#10       BattleController::Update+0xCB3
+```
+
+**`RunBattle+0x17C3` 的反汇编**（就在一条调用之后）：
+
+```asm
+0x18081C06E  call 0x1808C8B60     ; ★ BattleMapData::GetMoveRangeGrids
+0x18081C073  mov  rcx, [r15]      ; <- dump 报的帧
+```
+
+**该处的源码形态**（Ghidra 反编译 `RunBattle_named.c`）—— **AI 单位分支**：
+
+```c
+if (NowActiveUnitCanMove(...)) uVar7 = HeroData_GetMoveRange(...);
+BattleMapData_GetMoveRangeGrids(map, row, col, 0, uVar7, grids, selfTeamID, 0);
+[controller+0x238] = -1.0f;
+AISettingControlable(...);
+```
+
+→ 每个 AI 单位的回合都会经由 `GetMoveRangeGrids` 算移动范围，
+而 **`WallHighlightHook` 正是往这个函数里装两个 `ff25` detour**。
+
+**结论强度（重要）**：
+
+- ✅ 与「高亮 hook 有嫌疑」**一致**
+- ❌ **但不是证据**：FailFast 不产生硬件异常，dump 里没有 Exception 流；
+  且帧标着 `(stack scan)`（启发式恢复的返回地址，不保证是精确 IP）
+- dump **看不到故障指令**（`DOTNET_DbgMiniDumpType=1` 不抓模块映像）
+
+**已做**：拆出 `wall_native_hooks` 开关（单独控制 `WallPassHook` + `WallHighlightHook`），
+`passes` 数据写入仍保留 —— 用于二分。
+
+**待办**：`wall_native_hooks=false` 冷启动打完一场 →
+- 不崩 ⇒ 定位到原生 detour，再细分 `WallPassHook` vs `WallHighlightHook`
+- 还崩 ⇒ 与原生 hook 无关，嫌疑转向 `passes` 数据写入或既有问题
+
 ---
 
 ## 9. 参考文件
