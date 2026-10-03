@@ -14,8 +14,23 @@
 **可以对运行中的游戏执行 C# 表达式、直接读写活对象** —— 排查效率远高于读日志。
 
 - 服务端源码在 `MelonMCP/`（本项目自建，Mono.CSharp REPL 已 ILRepack 内嵌，可执行完整 C# 语句）。
+
+> ⚠️ **必须部署 Release 产物，不要部署 Debug。** ILRepack 的 `Condition="'$(Configuration)'=='Release'"`
+> 意味着 **Debug 构建里没有内嵌 `Mono.CSharp`**，于是 `execute_csharp` / `evaluate_expression`
+> 会报一个与其真实原因毫无关系的错：
+>
+> ```
+> The type initializer for 'MelonMCP.Tools.ExecuteCSharpToolDefinition' threw an exception.
+> ```
+>
+> 这是 `internal static readonly ScriptSession Session = new ScriptSession();` 这个静态字段
+> 初始化器在找不存在的 `Mono.CSharp`。**该报错与"代码写错了"无关**，不要去查 REPL 的代码。
+>
+> 快速判定：`monodis --typedef <dll> | grep -c Mono.CSharp` —— Release 应约 **713**，Debug 是 **0**。
+> 其它（不依赖 REPL 的）工具在 Debug 下仍可用，所以这个错很容易被误认为是单点问题。
 - **核心工具**：`execute_csharp` / `evaluate_expression` / `find_objects_of_type` / `list_game_objects` / `get_type_info` / `list_types` / `list_assemblies` / `read_logs`。
 - **排查补丁用的工具**（2026-10 新增）：`hook_patch_info`（补丁挂载/触发/生效 + patcher 类型 + 入口字节）、`list_patches`（全进程补丁清单，含其他 mod）、`disasm` / `read_mem` / `resolve_jump`（**运行时**字节与跳转解析）、`watch_field` / `unwatch_field`（轮询字段变化）。
+- **配置读写工具**：`list_configs` / `get_config` / `set_config` / `reset_config`（读写 MelonLoader 偏好设置，见 §7.1.1）。
 - **持久化的知识库**：`get_game_knowledge` / `add_game_knowledge`。
   ⚠️ **它只用于存「游戏本身的知识」**（世界观、设定、数值规则、游戏机制这类**与 mod 开发无关**、
   且**游戏更新也大体不变**的内容）。
@@ -63,6 +78,43 @@
 | 偶发卡顿 / 失败 | 网络问题，**直接重试** |
 | 局部变量重名 | `CS0136` —— 会话状态跨调用保持，换个名字 |
 | lambda 语句体里带 `new object[]{...}` | 编译失败，拆开写 |
+
+#### 7.1.1 配置读写：`list_configs` / `get_config` / `set_config` / `reset_config`
+
+让 agent **直接改 mod 配置**，不用手改 cfg，也不用开图形界面（agent 开不了 F5 窗口）。
+
+**建在 `MelonPreferences` 上，不依赖 `MelonPreferencesManager`。** 后者是给人用的游戏内 UI；
+工具靠它就会在任何别的 MelonLoader 环境失效。`MelonPreferences` 是 MelonLoader 本体的一部分。
+
+⚠️ **不要直接编辑 `MelonPreferences.cfg`。** MelonPreferences 把全部条目留在内存里、
+**整体重写**该文件。游戏运行时手改 cfg，会在下一次任何 mod（或用户）调 `Save()` 时
+**被内存里的值覆盖 —— 静默丢失**。必须走接口写。
+
+实测确认的语义（MelonLoader 0.7.3）：
+
+| 事实 | 说明 |
+|---|---|
+| `MelonPreferences.Categories` | 是 `List<MelonPreferences_Category>`，**不是 Dictionary**（用 Dictionary 强转报的是无信息的 NRE） |
+| category 的形状 | `Identifier` 是**属性**，`Entries` 是**字段** —— 两者不一致 |
+| entry 的值 | 非泛型基类 `MelonPreferences_Entry` 上有 `BoxedValue`，**可读可写**，是唯一能走泛型的入口 |
+| 写入生效范围 | `BoxedValue` / `SetEntryValue` **只改内存**，**不落盘** |
+| 落盘 | 必须显式 `MelonPreferences.Save()`；它**保留注释、不丢其它 category** |
+
+**`set_config` 要求 `confirm == "<mod>.<key>"`** —— 防止误写落盘（实测能拦住不匹配的 confirm）。
+
+#### ⚠️ 工具不判断「是否需要重启」，这是故意的
+
+值在**读取点**被读（`entry.Value`）→ 立即生效。
+值在 **`OnInitializeMelon` 里被消费**（典型：任何**装原生 hook / Harmony 补丁**的开关）
+→ **已经烧进进程，改了要冷启动**。
+
+只有各个 mod 自己知道属于哪种，**猜错比不猜更糟**：它正好会复现本项目反复踩的坑
+（§3.2.1）—— 读回 `true` 就以为生效了。所以 `set_config` 如实返回
+`restartRequired: "unknown - see tool description"`，并解释两种情况的区别。
+
+> 典型例子：`FriendlyNoclip` 的 `wall_native_hooks` / `wall_pass_hook` 控制的是
+> `OnInitializeMelon` 里一次性安装的原生 detour —— **改了值不会卸载已装的 hook**。
+> 而 `diagnostics` 在每次用的时候读 `.Value`，**改了立即生效**。
 
 ### 7.2 日志与文件路径
 
