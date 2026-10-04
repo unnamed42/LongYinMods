@@ -88,7 +88,7 @@ public class Plugin : MelonMod
 
     private HarmonyLib.Harmony? _harmony;
 
-    /// <summary>构建指纹（构建时刻 + 版本），启动时打印。见 csproj 的 <c>BuildStamp</c>。</summary>
+    /// <summary>构建指纹（版本号 + 自身 md5），启动时打印。判断产物是否一致以 md5 为准。</summary>
     internal static string BuildInfo { get; private set; } = "?";
 
     public override void OnInitializeMelon()
@@ -140,18 +140,24 @@ public class Plugin : MelonMod
     }
 
     /// <summary>
-    /// 读程序集自带的 <see cref="AssemblyInformationalVersionAttribute"/> 作为构建指纹。
-    /// 取不到就算了 —— 构建指纹绝不能影响启动。
+    /// 构建指纹：静态版本号 + 自身 md5。
+    /// 取不到就算了 —— 诊断信息绝不能影响启动。
+    ///
+    /// ★ 不读 InformationalVersion：那曾是「构建时刻」的载体，
+    ///   但时间戳进程序集内容会破坏 <Deterministic>，
+    ///   使同名源码两次构建 checksum 不同（已移除）。
+    ///   现在「跑的是不是新产物」以 md5 为准，启动日志直接打出来便于对账。
     /// </summary>
     private static string ReadBuildStamp()
     {
         try
         {
             Assembly asm = Assembly.GetExecutingAssembly();
+            string v = asm.GetName().Version?.ToString() ?? "?";
 
-            return asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-                   ?? asm.GetName().Version?.ToString()
-                   ?? "?";
+            return string.IsNullOrEmpty(asm.Location)
+                ? v
+                : $"{v} md5={AssemblyVersionHash.OfFile(asm.Location)}";
         }
         catch
         {

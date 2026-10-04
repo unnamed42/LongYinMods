@@ -24,14 +24,22 @@
          （附带：产物变成 Machine=x86-64 + PE32+，KDE Dolphin 的归类
            也跟着正常。那是结果，不是目的。） -->
     <PlatformTarget>x64</PlatformTarget>
-    <!-- 构建指纹：嵌一个「构建时刻」进去，启动日志会打出来。
-         本项目因为「跑的是旧产物」白耗过两轮，而症状是「代码不生效」——
-         与真正的逻辑 bug 无法区分。有这个时间戳，一眼就能判断。
-         （不用 LinkerTimestamp：它在很多构建配置下不准；
-           也不用静态的 1.0.0：那区分不了任何两次构建。） -->
-    <BuildStamp>$([System.DateTime]::UtcNow.ToString('yyMMdd-HHmmss'))</BuildStamp>
-    <Version>1.0.0+$(BuildStamp)</Version>
-    <InformationalVersion>$(BuildStamp)</InformationalVersion>
+    <!-- ⚠️ 不要往 Version / InformationalVersion / AssemblyMetadata 里塞构建时刻。
+         它们都会变成 [assembly: ...] 特性，也就是**程序集内容**；
+         内容一含时间，<Deterministic>true</Deterministic> 就形同虚设 ——
+         同一份源码连续构建两次 checksum 不同，
+         使「部署后核对 md5 一致」这一步永远失败。
+         （已实测：InformationalVersion 与 AssemblyMetadata 都会导致此问题。）
+
+         Deterministic 只保证「**相同输入** → 逐字节相同输出」，
+         它不会、也不可能把输入里的时间戳抹掉。
+         （它自 .NET SDK 起默认就是 true，写出来只为自文档化。）
+
+         曾有个 BuildStamp（时刻）属性就是因为上述原因被移除的 ——
+         「跑的是不是新产物」改为靠**部署后核对 md5**：
+         Deterministic 生效后 md5 是稳定的，这才是可靠的判据。
+         启动日志也会打印自身 md5（见 Plugin.cs），可直接对账。 -->
+    <Version>1.0.0</Version>
     <Authors>unnamed42</Authors>
     <Description>移动时允许穿越友方和城防</Description>
 
@@ -98,5 +106,4 @@
       <_Parameter4>$(Authors)</_Parameter4>
     </AssemblyAttribute>
   </ItemGroup>
-
 </Project>

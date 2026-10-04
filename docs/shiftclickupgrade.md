@@ -195,7 +195,7 @@ AreaBuildingData (普通 Il2CppSystem.Object)
 2. **冷启动游戏**（必须 —— 见 `AGENTS.md` §3.2.1）。
 3. 确认启动日志里的 `【构建 …】` 与刚构建的一致：
    ```
-   ShiftClickUpgrade 初始化完成：挂载 5 个补丁，enabled=True，probe_only=False。【构建 261004-xxxxxx】
+   ShiftClickUpgrade 初始化完成：挂载 5 个补丁，enabled=True，probe_only=False。【构建 1.0.0 md5=44fefa2e…】
    已挂载补丁：AreaBuildingIconController.OnClick (IL=0x...) -> ...OnClick_Prefix | patcher=Il2CppDetourMethodPatcher [IsValid=True]
    ```
 4. 进大地图 → **点锤子**（建造模式）→ **按住 Shift 点建筑**。

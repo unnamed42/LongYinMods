@@ -421,26 +421,21 @@ public class Plugin : MelonMod
         //   现在改钩 BattleUnit.EnterGrid（见上方 TryPatchPrefix），
         //   它是单位占据格子的唯一汇聚点（6 个调用者覆盖入场/AI移动/点击/撤销）。
 
-        // ★ 构建指纹：一行就能回答「现在跑的是哪个产物」。
+        // 版本号：回答「现在跑的是哪个产物」。
         //
         // 本项目因为「跑的是旧产物」白耗过整整两轮，而症状是「代码不生效」——
-        // 与真正的逻辑 bug 无法区分。把构建时间/版本打出来，
-        // 以后一眼就能排除这一类可能（见 AGENTS.md §3.2）。
+        // 与真正的逻辑 bug 无法区分（见 AGENTS.md §3.2）。
+        //
+        // ★ 判断「跑的是不是新产物」靠**部署后核对 md5**，不靠日志里的时间戳：
+        //   <Deterministic> 已生效，同一份源码两次构建逐字节相同，
+        //   md5 是可靠的。所以这里只打静态版本号（不含时间）。
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
-        string buildInfo = "?";
+        string buildInfo = asm.GetName().Version?.ToString() ?? "?";
 
-        try
+        if (!string.IsNullOrEmpty(asm.Location))
         {
-            // LinkerTimestamp 在很多构建下不准，改用程序集自带的
-            // InformationalVersion（若 csproj 未设则为 1.0.0）。
-            buildInfo = asm.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
-                            ?.InformationalVersion
-                        ?? asm.GetName().Version?.ToString()
-                        ?? "?";
-        }
-        catch
-        {
-            // 取不到就算了，不能让日志影响启动。
+            // 多打一行 md5，部署时可以同这条日志直接对账（不必再去翻文件）。
+            buildInfo += $" md5={AssemblyVersionHash.OfFile(asm.Location)}";
         }
 
         LoggerInstance.Msg(

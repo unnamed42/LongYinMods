@@ -137,9 +137,11 @@ catch (Exception value)
 
 ### 2.3 顺带修的两个小问题
 
-- **构建指纹原本打不出来**：启动日志里 `构建 unknown`，改成读
-  `AssemblyInformationalVersion`（csproj 里的 `BuildStamp`）。
+- **构建指纹原本打不出来**：启动日志里 `构建 unknown`。现在打印**静态版本号 + 自身 md5**。
   这是本项目「跑的是旧产物」教训的直接应用 —— 一眼分辨跑的是哪个产物。
+  > 中间曾用 `AssemblyInformationalVersion`（csproj 的 `BuildStamp`）携带构建时刻，
+  > **已废弃**：时间戳是程序集内容，会破坏 `<Deterministic>`，
+  > 使同源码两次构建 md5 不同（见 AGENTS.md §3.2.0）。
 - **`SafeForceName` 的兜底**：反射和 `GetForceName` 都失败时，降级读
   `ForceData.forceName` 字段（字段不受方法签名变化影响）。
 
