@@ -62,6 +62,41 @@ namespace MelonMCP.Tools
 
             ImportLoadedAssemblies();
             ApplyDefaultUsings();
+            WarmUpExtensionMethods();
+        }
+
+        /// <summary>
+        /// Forces extension methods to resolve once during initialisation.
+        ///
+        /// WHY THIS IS NEEDED (measured, reproducible): after a session is created or reset, the
+        /// FIRST snippet calling an extension method - <c>x.Count()</c>, <c>x.Where(...)</c> -
+        /// returns no value, and only the SECOND one works. Non-extension calls are unaffected:
+        /// <c>x.Length</c> works on the first try. Deterministic across repeated trials, and not a
+        /// caller-side caching artefact.
+        ///
+        /// The likely mechanism is that extension-method lookup needs one compilation pass before the
+        /// imported extension types become visible, and the failing snippet's own compilation is what
+        /// would have supplied it. Running a throwaway snippet here pays that cost up front, so the
+        /// caller's first LINQ query behaves like its second.
+        ///
+        /// This works around a Mono.CSharp behaviour rather than fixing it: the extension methods are
+        /// imported correctly by ReferenceAssembly, which calls ImportTypes with
+        /// importExtensionTypes: true internally. If a future mcs build resolves extensions on the
+        /// first pass this becomes dead weight and can be deleted.
+        ///
+        /// Failures are swallowed by design - this is an optimisation, and a session that cannot warm
+        /// up still works; the caller merely pays the cost on their first LINQ call.
+        /// </summary>
+        private void WarmUpExtensionMethods()
+        {
+            try
+            {
+                _evaluator.Evaluate("(new int[]{1}).Count()");
+            }
+            catch
+            {
+                // Ignored by design; see the summary.
+            }
         }
 
         /// <summary>
@@ -121,6 +156,30 @@ namespace MelonMCP.Tools
             }
         }
 
+        /// <summary>
+        /// Imports the default namespaces.
+        ///
+        /// On extension methods and LINQ: importing the namespace is necessary but NOT sufficient -
+        /// the DEFINING ASSEMBLY must also be referenced. Extension methods are discovered through
+        /// assembly imports, not through using directives. Verified against this Mono.CSharp build:
+        /// ReflectionImporter.ImportAssembly internally calls
+        /// ImportTypes(types, ns, importExtensionTypes: true), so ReferenceAssembly already imports
+        /// them and no extra work is needed.
+        ///
+        /// Two consequences worth knowing before touching ImportLoadedAssemblies:
+        ///
+        /// 1. Do NOT additionally call ImportTypes(importExtensionTypes: true, ...) for an assembly
+        ///    ReferenceAssembly already handled. It registers every extension method a second time,
+        ///    and every LINQ call then fails with CS0121 listing the SAME signature twice - which
+        ///    reads like a compiler bug and is not. Referencing System.Core alongside System.Linq
+        ///    does the same thing, because both expose System.Linq.Enumerable (netstandard too);
+        ///    only the defining assembly may be imported.
+        ///
+        /// 2. Extension syntax failing while a static call to the same method works means the
+        ///    assembly was never imported - not that a using directive is missing. Here the failure
+        ///    is silent (the snippet reports no value instead of raising CS1061), so it is easily
+        ///    misread as "my query returned nothing".
+        /// </summary>
         private void ApplyDefaultUsings()
         {
             foreach (var ns in DefaultUsings)

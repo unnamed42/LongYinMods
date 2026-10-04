@@ -26,11 +26,25 @@ The code has access to:
 
 Full C# is supported: variables, operators, foreach, new, generics, lambdas and LINQ.
 State persists between calls; pass reset=true to clear it. A trailing expression is returned.
+LINQ extension syntax (x.Count(), x.Where(...), x.Select(...)) works on the first call after a reset.
 
 Examples:
 - UnityEngine.SceneManagement.SceneManager.GetActiveScene().name
 - string.Join("","", UnityEngine.Object.FindObjectsOfType<UnityEngine.Camera>().Select(c => c.name))
-- var go = UnityEngine.GameObject.Find(""Player""); go != null ? go.transform.position.ToString() : ""not found""";
+- var go = UnityEngine.GameObject.Find(""Player""); go != null ? go.transform.position.ToString() : ""not found""
+
+CRASH RISK - READ BEFORE RUNNING HEAVY REFLECTION.
+This runs on the Unity main thread with a SMALL stack (about 82 KiB, measured). A stack overflow
+here CANNOT be caught: it is a guard-page fault in native code, so the process dies instantly with
+no exception, no log, and no chance to clean up. Two confirmed ways to trigger it:
+  - MakeGenericMethod / Type.MakeGenericType inside a loop, or across many types
+  - deep or recursive reflection over a large type set
+Prefer direct typed access. If a runtime-generic call is genuinely needed, do ONE per call and
+confirm it returned before doing another. For anything heavier, add a tool to the mod instead -
+compiled C# runs on a normal stack and cannot hit this.
+
+This call also cannot be interrupted: there is no working timeout, so an accidental infinite loop
+hangs the game until it is killed from outside.";
 
         /// <summary>
         /// Session shared by all script tools. State (variables, usings, defined types) persists

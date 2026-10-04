@@ -119,6 +119,17 @@
       <HintPath>$(UnityPath)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!--
+      Il2Cppmscorlib supplies Il2CppSystem.Type and Il2CppSystem.Object, which the non-generic
+      Resources.FindObjectsOfTypeAll(Il2CppSystem.Type) overload needs. Without this reference the
+      compiler reports those two types as missing from Il2CppSystem: the namespace resolves via
+      Il2CppInterop.Runtime, but the types themselves live only in this assembly.
+      Supplied by MelonLoader at runtime, hence Private=false.
+    -->
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(UnityPath)\Il2Cppmscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>

@@ -320,6 +320,11 @@ namespace MelonMCP
             _server.RegisterTool(new WatchFieldToolDefinition());
             _server.RegisterTool(new UnwatchFieldToolDefinition());
 
+            // Reads named fields across instances of a type. Distinct from the DISABLED inspection
+            // tools: it never discovers members by reflection, it only reads the exact field paths
+            // the caller names. That inversion is what keeps it working under IL2CPP.
+            _server.RegisterTool(new InspectUnityObjectToolDefinition());
+
             // Configuration tools. Built on MelonPreferences (part of MelonLoader itself) rather
             // than on MelonPreferencesManager, so they work on any MelonLoader install and do not
             // require a human-facing in-game UI that an agent could not open anyway.

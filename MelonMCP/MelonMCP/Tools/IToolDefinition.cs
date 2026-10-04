@@ -130,6 +130,50 @@ namespace MelonMCP.Tools
             return defaultValue;
         }
 
+        /// <summary>
+        /// Reads a string-array argument, tolerating the shapes a client may actually send.
+        ///
+        /// Accepts both a JSON array (["a","b"]) and a single bare string ("a"), because an MCP
+        /// client that has only one value to pass has no reason to wrap it in an array and several
+        /// do not. Elements are coerced with ToString rather than cast, so a numeric entry like [1,2]
+        /// yields ["1","2"] instead of dropping the whole argument.
+        ///
+        /// Returns an empty list (never null) when absent, so callers can iterate unconditionally.
+        /// </summary>
+        protected List<string> GetStringArrayArg(Dictionary<string, JToken> arguments, string name)
+        {
+            var result = new List<string>();
+
+            if (!arguments.TryGetValue(name, out var token) || token == null)
+            {
+                return result;
+            }
+
+            try
+            {
+                if (token.Type == JTokenType.Array)
+                {
+                    foreach (var item in (JArray)token)
+                    {
+                        var text = item?.ToString();
+                        if (!string.IsNullOrWhiteSpace(text)) result.Add(text);
+                    }
+                }
+                else if (token.Type != JTokenType.Null)
+                {
+                    var text = token.ToString();
+                    if (!string.IsNullOrWhiteSpace(text)) result.Add(text);
+                }
+            }
+            catch
+            {
+                // A malformed argument yields an empty list; the caller reports "no fields" rather
+                // than failing the whole call over a type mismatch.
+            }
+
+            return result;
+        }
+
         #endregion
 
         #region Result Helpers

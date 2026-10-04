@@ -31,6 +31,7 @@
 - **核心工具**：`execute_csharp` / `evaluate_expression` / `find_objects_of_type` / `list_game_objects` / `get_type_info` / `list_types` / `list_assemblies` / `read_logs`。
 - **排查补丁用的工具**（2026-10 新增）：`hook_patch_info`（补丁挂载/触发/生效 + patcher 类型 + 入口字节）、`list_patches`（全进程补丁清单，含其他 mod）、`disasm` / `read_mem` / `resolve_jump`（**运行时**字节与跳转解析）、`watch_field` / `unwatch_field`（轮询字段变化）。
 - **配置读写工具**：`list_configs` / `get_config` / `set_config` / `reset_config`（读写 MelonLoader 偏好设置，见 §7.1.1）。
+- **批量读字段**：`inspect_unity_object`（按类型枚举实例 + 读点号路径字段，见 §7.1.2）。
 - **持久化的知识库**：`get_game_knowledge` / `add_game_knowledge`。
   ⚠️ **它只用于存「游戏本身的知识」**（世界观、设定、数值规则、游戏机制这类**与 mod 开发无关**、
   且**游戏更新也大体不变**的内容）。
@@ -116,6 +117,64 @@
 > `OnInitializeMelon` 里一次性安装的原生 detour —— **改了值不会卸载已装的 hook**。
 > 而 `diagnostics` 在每次用的时候读 `.Value`，**改了立即生效**。
 
+#### 7.1.2 `inspect_unity_object` —— 按类型批量读字段
+
+一条调用替代「手写 `foreach` + 空值保护 + 拼字符串」。用法：
+
+```
+inspect_unity_object {
+  typeName: "AreaBuildingIconController"     // 必填，短名即可（走 TypeResolver）
+  fields:   ["buildingData.buildingID", "buildingData.lv"]   // 点号路径，逐段解析
+  count:    20        // 默认 20，上限 200
+  where:    "buildingData.buildingID=-1"     // 按字段值过滤
+}
+```
+
+**失败隔离是它的核心价值**：某字段/某实例读失败 → 该格显示 `<err:...>`，
+**其余列、其余实例照常返回**。一个坏对象不会让整批失败。
+
+##### ⚠️ 为什么它不会重蹈被禁用工具的覆辙
+
+`list_components` / `inspect_component` / `toggle_behaviour` 那批被禁用的工具，
+共同死因是**靠反射通用地发现**组件与属性 —— IL2CPP 下代理类型塌缩成
+`UnityEngine.Component`，反射枚举属性全装箱成 `Il2CppSystem.Object`，读不出值。
+
+本工具**反过来**：`typeName` 与 `fields` 都由调用方**显式给出**，不做任何自动发现。
+
+> 🚫 **不要把它「改进」成自动字段发现器** —— 那就退回到已被证明失败的做法了。
+
+##### ⚠️ 两个 IL2CPP 陷阱（都实测踩过）
+
+**1. 必须用泛型重载 `FindObjectsOfTypeAll<T>()`，不能用非泛型的。**
+
+非泛型重载声明的返回类型是 `Il2CppReferenceArray<Object>`，于是
+**只有 index 0 携带具体代理类型，从 index 1 起全部退化成 `UnityEngine.Object`**：
+
+```
+非泛型重载取回的 Transform 实例：
+  [0] managed=Transform   actual=RectTransform
+  [1] managed=Object      actual=RectTransform   ← 塌缩
+  [2] managed=Object      actual=RectTransform
+```
+
+症状很误导：`name` 能读（`Object` 上也有），`position` 读不到 →
+报 `no member 'position' on Object`，**看起来像字段名写错，实际是实例问题**。
+
+泛型重载的元素类型是 `Il2CppReferenceArray<T>`，**每个元素都保留具体类型**。
+运行时类型已知时用 `MakeGenericMethod` 调用即可（**一次调用**的反射开销可忽略）。
+
+**2. `where` 的布尔比较要不区分大小写。**
+
+布尔渲染成 `true`/`false`（C# 惯例），而调用方/JSON 参数自然写成 `True`。
+严格比较会**静默选不出任何实例** —— 与「确实没有该值的实例」无法区分。
+
+##### 与 `GridUnitData` 这类非 Unity 类型的关系
+
+`GameObject` / `Transform` / `Component` 这类 `UnityEngine.Object` 子类可以枚举；
+`GridUnitData` / `BattleData` 之类**不是** Unity 对象，`FindObjectsOfTypeAll` 不接受，
+工具会给出明确拒绝而不是空结果。要取那些得走游戏自己的容器
+（如 `BattleController.battleMapData.GetGridData(r, c)`）。
+
 #### `execute_csharp` 的三类结果（及曾经的静默失败）
 
 **这三种情况必须能分辨** —— 混在一起会让人在**正确的代码**里找不存在的 bug
@@ -160,6 +219,48 @@ hasValue = true;          // ← 无条件置 true，哪怕 value 是 null
 实测（2026-10，活进程）：同样是 void 调用 + 声明，
 修复前一律回 `Execution completed (no result).`；修复后回明确的
 「成功但无值」，而带裸尾表达式的写法一直正常。
+
+#### ⚠️ `execute_csharp` 会**把游戏搞崩**：栈只有约 82 KiB
+
+**这条比缺工具重要** —— 它能让整个游戏进程消失，且**无法捕获**。
+
+实测：REPL 跑在 Unity 主线程上，栈约 **82 KiB**。在 `execute_csharp` 里做
+**重反射**会**栈溢出** —— 命中 guard page，原生代码抛 `EXCEPTION_STACK_OVERFLOW`，
+CoreCLR 不处理，**直接 abort**：无异常、无日志、无 coredump（除非开了 minidump）。
+
+**本项目已因此崩过两次**，两次都是同一个模式：
+
+| 场景 | 结果 |
+|---|---|
+| GC 堆遍历回调里调 `il2cpp_object_get_class` + 反射取类名 | 崩 |
+| 循环里 `MakeGenericMethod` / 反射遍历类型 | 崩 |
+
+两次都靠 `tools/il2cpp_unwind.py` 从容确认：**主线程栈用量 = 总量**。
+
+**纪律：重反射写进 mod 源码（编译后的 C# 有正常栈），不要在 `execute_csharp` 里跑。**
+必须用运行时泛型时，**一次只做一个**，确认返回后再做下一个。
+
+> ⚠️ **catch 不住。** 这是原生栈溢出，不是托管异常 —— `try/catch` 无效。
+> `execute_csharp` 的 `timeout` 参数**也拦不住**（它目前未被使用，且执行在主线程上，
+> 无法安全中断）。只能靠预防。
+
+#### ⚠️ LINQ 首次调用曾经失效（已修）
+
+**症状**：`reset` 后的**第一次** LINQ 扩展方法调用（`x.Count()` / `x.Where(...)`）
+返回「成功但无值」，**第二次**才正常。非扩展方法（`x.Length`）不受影响。
+
+**不是** using 缺失：`System.Linq.Enumerable.Count(x)` 静态调用一直正常，
+说明命名空间与程序集都在。**是首次编译尚未建立扩展方法查找**。
+
+**修法**：会话初始化时跑一次丢弃的 `(new int[]{1}).Count()` 预热
+（`ScriptSession.WarmUpExtensionMethods`）。
+
+**踩坑记录（我改错过两次）**：一度以为要调 `Evaluator.ImportTypes(...)`，
+结果 LINQ 全线报 `CS0121: ambiguous`，**且列出的两个签名一模一样**（看着像编译器 bug）。
+根因：`ReflectionImporter.ImportAssembly` **内部已经**调
+`ImportTypes(..., importExtensionTypes: true)` —— 再调一次就是重复注册。
+另：`System.Core` / `netstandard` 都转发 `System.Linq.Enumerable`，
+**一起引用会同样重复**；只有定义它的那个程序集能导入。
 ### 7.2 日志与文件路径
 
 - **日志**：`gamedir/MelonLoader/Latest.log`
