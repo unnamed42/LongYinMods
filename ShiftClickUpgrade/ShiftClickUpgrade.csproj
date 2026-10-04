@@ -1,0 +1,100 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>ShiftClickUpgrade</AssemblyName>
+    <RootNamespace>Unnamed42.ShiftClickUpgrade</RootNamespace>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <OutputType>Library</OutputType>
+    <Deterministic>true</Deterministic>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- ★ 必须显式声明 x64。不写就是 AnyCPU，Roslyn 把 PE 头写成
+         Machine=i386 + OptionalMagic=PE32。对于纯托管程序集这个字段只是提示，
+         CLR 不据此拒绝加载；但本仓库全程是 64 位假设（IntPtr / 原生读取），
+         AnyCPU 会给了代码一个假的「可移植」外观。声明 x64 让 64 位假设在构建期成立。 -->
+    <PlatformTarget>x64</PlatformTarget>
+
+    <!-- 构建指纹：嵌一个「构建时刻」进去，启动日志会打出来。
+         本项目因为「跑的是旧产物」白耗过两轮，而症状是「代码不生效」——
+         与真正的逻辑 bug 无法区分。有这个时间戳，一眼就能判断。 -->
+    <BuildStamp>$([System.DateTime]::UtcNow.ToString('yyMMdd-HHmmss'))</BuildStamp>
+    <Version>1.0.0+$(BuildStamp)</Version>
+    <InformationalVersion>$(BuildStamp)</InformationalVersion>
+    <Authors>unnamed42</Authors>
+    <Description>Shift+单击直接升级建筑</Description>
+
+    <GameDir>..\gamedir</GameDir>
+    <Il2cppDir>..\gamedir\MelonLoader\Il2CppAssemblies</Il2cppDir>
+    <MelonLoaderDir>..\gamedir\MelonLoader\net6</MelonLoaderDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MelonLoader">
+      <HintPath>$(MelonLoaderDir)\MelonLoader.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(MelonLoaderDir)\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(MelonLoaderDir)\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(Il2cppDir)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(Il2cppDir)\Il2Cppmscorlib.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem.Core">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(Il2cppDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(Il2cppDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- UnityEngine.UI：`UnityEngine.UI.Button` / `Text` 在这里。
+         “通过触发 UI 元素实现升级”的方案需要它（读按钮、调 onClick.Invoke）。 -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(Il2cppDir)\UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- AudioModule：`AudioClip` / `AudioSource` 在这里，
+         不引会报 CS0246「未能找到类型 AudioClip」。
+         （与 InputLegacyModule 同属 Unity 的拆分模块，都得单独引。） -->
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(Il2cppDir)\UnityEngine.AudioModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(Il2cppDir)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="MelonLoader.MelonInfo">
+      <_Parameter1>Unnamed42.ShiftClickUpgrade.Plugin</_Parameter1>
+      <_Parameter1_TypeName>System.Type</_Parameter1_TypeName>
+      <_Parameter2>$(Description)</_Parameter2>
+      <_Parameter3>$(Version)</_Parameter3>
+      <_Parameter4>$(Authors)</_Parameter4>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

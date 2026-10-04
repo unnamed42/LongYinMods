@@ -23,7 +23,8 @@
 |---|---|---|
 | **不随游戏构建变化的**：工具命令、环境、API 用法、踩坑、项目约定 | `AGENTS.md`（简述）+ `docs/<专题>.md`（详情） | 换游戏版本也不失效 |
 | **具体的游戏地址 / 字段偏移 / metadata token / 调用链 / 实测行为** | `docs/<项目>.md`（如 [`friendlynoclip.md`](docs/friendlynoclip.md)） | **游戏一更新即失效** |
-| **游戏本身的知识**（世界观、数值规则、机制） | MCP 知识库 `add_game_knowledge` | 与 mod 开发无关、更新也不变 |
+| **游戏本身的知识** —— 仍不随构建变（世界观、数值规则） | MCP 知识库 `add_game_knowledge` | 与 mod 开发无关、更新也不变 |
+| **游戏本身的知识** —— 会随构建变（系统机制 / 组件用法 / 字段语义） | [`docs/game-internals.md`](docs/game-internals.md) | 做**别的 mod** 时会复用到，且**游戏更新即失效** |
 
 ---
 
@@ -242,7 +243,8 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 读写原生内存、装自制 detour、用 Iced 汇编 stub | [docs/native-hooks.md](docs/native-hooks.md) |
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
-| 看某个 mod 的设计与取舍 | [docs/friendlynoclip.md](docs/friendlynoclip.md) |
+| 看某个 mod 的设计与取舍 | [docs/friendlynoclip.md](docs/friendlynoclip.md)、[docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
+| 查**游戏本身**的机制（音效 / 资源 / 建筑系统） | [docs/game-internals.md](docs/game-internals.md) |
 | 遇到不认识的数值字段（是不是枚举？有哪几档？） | [docs/native-hooks.md](docs/native-hooks.md) 的「不透明字段三步排查法」 |
 
 ---
@@ -252,5 +254,6 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 项目 | 说明 | 文档 |
 |---|---|---|
 | FriendlyNoclip | 战斗格子地图允许穿越友方 | [docs/friendlynoclip.md](docs/friendlynoclip.md) |
+| ShiftClickUpgrade | Shift+单击直接升级建筑 | [docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
 
 > **通用内容写 `AGENTS.md` / `docs/<专题>.md`，项目内容写 `docs/<项目>.md`，新发现随代码改动一起更新（不是以后补）。**
