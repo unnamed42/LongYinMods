@@ -32,6 +32,7 @@
 - **排查补丁用的工具**（2026-10 新增）：`hook_patch_info`（补丁挂载/触发/生效 + patcher 类型 + 入口字节）、`list_patches`（全进程补丁清单，含其他 mod）、`disasm` / `read_mem` / `resolve_jump`（**运行时**字节与跳转解析）、`watch_field` / `unwatch_field`（轮询字段变化）。
 - **配置读写工具**：`list_configs` / `get_config` / `set_config` / `reset_config`（读写 MelonLoader 偏好设置，见 §7.1.1）。
 - **批量读字段**：`inspect_unity_object`（按类型枚举实例 + 读点号路径字段，见 §7.1.2）。
+- **日志分组**：`read_logs` 带 `group_by="prefix"` 时返回**按频率排序的分组计数**，用于判断「哪条日志在刷屏」（见 §7.1.3）。
 - **持久化的知识库**：`get_game_knowledge` / `add_game_knowledge`。
   ⚠️ **它只用于存「游戏本身的知识」**（世界观、设定、数值规则、游戏机制这类**与 mod 开发无关**、
   且**游戏更新也大体不变**的内容）。
@@ -174,6 +175,59 @@ inspect_unity_object {
 `GridUnitData` / `BattleData` 之类**不是** Unity 对象，`FindObjectsOfTypeAll` 不接受，
 工具会给出明确拒绝而不是空结果。要取那些得走游戏自己的容器
 （如 `BattleController.battleMapData.GetGridData(r, c)`）。
+
+#### 7.1.3 `read_logs` 的分组统计 —— 回答「哪条日志在刷屏」
+
+`read_logs` 的 `filter` 是「**筛选后逐条返回**」，回答不了「**各类分别多少条**」。
+要判断该关掉哪个诊断项，需要的是**计数**：
+
+```
+read_logs { group_by: "prefix", count: 1000, limit: 20 }
+```
+
+```
+Log groups by prefix  (8 group(s) over 173 line(s))
+
+51  探针·图标点击
+34  探针·Shift 点击
+30  探针·锤子切换
+28  Shift+单击升级
+27  探针·地块点击
+```
+
+这一步以前只能**绕过 MCP 去 shell 里 `grep | sort | uniq -c`**。
+
+##### ⚠️ 分组键怎么取（两个坑都能让结果变成废数据）
+
+日志行有两种形态，取错那一个**不会报错，只会给出无用的结果**：
+
+```
+[07:50:17] [MelonMCP] Registered tool: read_logs          ← 一个 tag（logger 名）
+[07:50:25] [WARNING] [MelonMCP] [探针·图标点击] 第 1 次    ← 两个 tag
+```
+
+1. **必须忽略时间戳与 level**，否则每行都是独立一组。
+2. **两个 tag 时要取第二个**。第一个 `[MelonMCP]` 是这个 mod 打的**所有**日志共用的
+   logger 名 —— 拿它当键会把所有消息合并成一组，输出「1 组 N 行」，
+   **看起来像正常结果，实际啥也没回答**。
+3. **只有一个 tag 时不能直接用那个 tag**，要退到**消息正文**。否则同上的塌缩：
+   `[MelonMCP] Could not subscribe...` 与 `[MelonMCP] no tag here 1` 会被并成一组。
+4. **序号必须归一化**。`[探针] 第 32 次` / `第 33 次` 不抹掉数字就变成 32 个组、每组 1 条 ——
+   这是本工具「看起来在工作但没在工作」的第二种形态。已处理：
+   `第 N 次`、`#N`、`count=N`、`N times`、行尾 `(N)`。
+
+> ⚠️ 归一化**故意不粗暴替换所有数字** —— `item 32` / `item 45` 可能是有意义的不同消息。
+> 只处理**计数器形态**的出现。
+
+##### ⚠️ 日志缓冲的已知局限
+
+`read_logs` 读的是 MelonMCP 自己的缓冲，而它**只装得下订阅成功的事件**。
+本 MelonLoader 构建下 Msg 通道**绑定失败**（启动日志里有
+`Could not subscribe to Msg logs via reflection`），所以 **WARNING / ERROR 可靠，
+普通 Msg 可能缺失**。
+
+→ **「这里没有」不等于「从来没打过」**。排查时优先用 `Warning`/`Error` 打日志，
+或直接读磁盘上的 `MelonLoader/Latest.log`。
 
 #### `execute_csharp` 的三类结果（及曾经的静默失败）
 

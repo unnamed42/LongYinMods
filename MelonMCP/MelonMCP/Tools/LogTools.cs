@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using MelonMCP.Server;
 using Newtonsoft.Json.Linq;
 
@@ -10,7 +12,19 @@ namespace MelonMCP.Tools
     public class ReadLogsToolDefinition : ToolDefinitionBase
     {
         public override string Name => "read_logs";
-        public override string Description => "Read recent MelonLoader log messages. Use this to see console output, errors, warnings, and messages from mods.";
+        public override string Description => @"Read recent MelonLoader log messages - console output, errors, warnings and messages from mods.
+
+Two modes:
+- default: return the matching lines.
+- group_by='prefix': return counted GROUPS ordered by frequency, for when the question is 'which
+  message is flooding the log' rather than 'what does the log say'. A plain 'filter' cannot answer
+  that: it returns matching lines one by one, so a message logged 32 times looks the same as 32
+  distinct messages. Groups are keyed on the leading [tag], with embedded sequence numbers
+  normalised away so repeated calls collapse together.
+
+Note on the buffer: it only holds what MelonMCP could subscribe to. In this MelonLoader build the
+Msg channel fails to bind, so WARNING and ERROR are captured reliably while plain Msg lines may be
+missing. Absence of a message here does not prove it was never logged.";
         public override bool RequiresMainThread => false;
 
         protected override ToolInputSchema GetInputSchema()
@@ -37,6 +51,31 @@ namespace MelonMCP.Tools
                         Type = "string",
                         Description = "Filter by log level",
                         Enum = new List<string> { "all", "error", "warning" }
+                    },
+                    ["group_by"] = new ToolPropertySchema
+                    {
+                        Type = "string",
+                        Description = "Set to 'prefix' to return counted GROUPS instead of individual "
+                                    + "lines, ordered by frequency. Use this to answer 'which message "
+                                    + "is flooding the log' - a plain text filter returns the matching "
+                                    + "lines one by one and cannot answer a counting question."
+                    },
+                    ["limit"] = new ToolPropertySchema
+                    {
+                        Type = "integer",
+                        Description = "With group_by=prefix: how many top groups to return "
+                                    + "(default 20). Ignored otherwise.",
+                        Default = 20,
+                        Minimum = 1,
+                        Maximum = 500
+                    },
+                    ["includeExample"] = new ToolPropertySchema
+                    {
+                        Type = "boolean",
+                        Description = "With group_by=prefix: include one full sample line per group, "
+                                    + "so a group key can be traced back to the real message "
+                                    + "(default true).",
+                        Default = true
                     }
                 }
             };
@@ -69,7 +108,76 @@ namespace MelonMCP.Tools
                 return TextResult("No log entries found matching the criteria.");
             }
 
+            var groupBy = GetStringArg(arguments, "group_by");
+            if (string.Equals(groupBy, "prefix", StringComparison.OrdinalIgnoreCase))
+            {
+                return RenderGroups(logs, arguments);
+            }
+
             return TextResult(string.Join("\n", logs));
+        }
+
+        /// <summary>
+        /// Renders counted groups, highest count first.
+        ///
+        /// Counts are computed over the FILTERED buffer slice, so a group's number answers "how many
+        /// of these matched" rather than "how many exist in total". 'count' still bounds how much of
+        /// the buffer is examined, which is why the header states the number of lines grouped - a
+        /// group count read without that denominator is easy to misjudge.
+        /// </summary>
+        private CallToolResult RenderGroups(List<string> logs, Dictionary<string, JToken> arguments)
+        {
+            var limit = GetIntArg(arguments, "limit", 20);
+            if (limit < 1) limit = 1;
+            if (limit > 500) limit = 500;
+
+            var includeExample = GetBoolArg(arguments, "includeExample", true);
+
+            var groups = LogGrouper.Group(logs);
+
+            var byCount = groups.Count;
+            var shown = groups.Take(limit).ToList();
+
+            var builder = new System.Text.StringBuilder();
+            builder.Append($"Log groups by prefix  ({byCount} group(s) over {logs.Count} line(s)");
+
+            if (byCount > shown.Count)
+            {
+                builder.Append($", showing top {shown.Count}");
+            }
+            builder.AppendLine(")");
+            builder.AppendLine();
+
+            // Pad the count column so the keys line up; width follows the largest count actually shown.
+            var countWidth = shown.Count == 0 ? 1 : shown.Max(g => g.Count.ToString().Length);
+
+            foreach (var g in shown)
+            {
+                builder.Append(g.Count.ToString().PadLeft(countWidth));
+                builder.Append("  ");
+                builder.AppendLine(g.Key);
+
+                if (includeExample)
+                {
+                    builder.Append(new string(' ', countWidth + 2));
+                    builder.AppendLine("  " + Truncate(g.Example, 160));
+                }
+            }
+
+            if (byCount > shown.Count)
+            {
+                builder.AppendLine();
+                builder.Append($"... {byCount - shown.Count} more group(s) not shown; raise 'limit' to see them.");
+            }
+
+            return TextResult(builder.ToString().TrimEnd());
+        }
+
+        /// <summary>Truncates for display without throwing on short input.</summary>
+        private static string Truncate(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text)) return string.Empty;
+            return text.Length <= max ? text : text.Substring(0, max) + "…";
         }
     }
 
