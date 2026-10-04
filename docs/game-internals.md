@@ -150,9 +150,87 @@ resourceStoreMax = [1000, ...]          <- 上限能正常读到
 | `resourceStoreMax : List<float>` | 资源上限 |
 | `CostResource(List<float>, bool showInfo)` | 扣资源 |
 | `ChangeResource(List<float>, bool, bool)` | 增减资源 |
+| `ChangeResource(Int32 id, Single num, Boolean, Boolean)` | 单项增减资源（三个重载都实际存在，补丁要各自挂） |
 | `HaveResource(Int32 id, Single num)` / `HaveResource(List<float>)` | 是否够 |
 | `GetResourcePercent(Int32)` | 资源百分比 |
+| `GetForceName(Boolean replacedForce)` | 门派名。⚠️ **签名已变**，见 §2.2a |
+| `GetOwnHeros() : List<HeroData>` / `GetLeader() : HeroData` | 门派成员 / 掌门 |
+| `forceName : String` | 门派名字段（**不走 `GetForceName`**，签名永远不会变） |
 
+#### 2.2a ⚠️ `GetForceName` 的签名变了（旧 mod 的 `MissingMethodException` 根源）
+
+**旧签名（早于 2026-10）**：`System.String ForceData.GetForceName()` —— 无参。
+**当前签名（实测 2026-10-04）**：`System.String ForceData.GetForceName(Boolean replacedForce = true)`。
+
+实测该类型上 `GetForceName` **只有一个重载**，即那个带 `bool` 的：
+
+```
+重载数量 = 1
+  System.String GetForceName(Boolean)
+```
+
+后果：任何**在旧签名时期编译**、没重新构建的 mod，其 IL 里绑定的是
+`GetForceName()`。运行时找不回该签名，于是**每次调用都抛**：
+
+```
+System.MissingMethodException: Method not found: 'System.String Il2Cpp.ForceData.GetForceName()'.
+```
+
+> 💡 **`replacedForce` 的语义**：该参数与 `ForceData.replacedForce` / `forceSetName`
+> （替换门派名）相关；传 `true` 走「替换后」的名字，即与游戏 UI 显示一致。
+> 实测 `forceID=0` 传 `true` 返回 `长乐帮`，字段 `forceName` 同样是 `长乐帮`。
+
+**这个 bug 为什么隐蔽 —— 「在同一方法内包 try/catch」是无效的**：
+
+典型的写法和 `ForceOverflowDividend` 一样：
+
+```csharp
+private static string SafeForceName(ForceData force)
+{
+    try   { return force.GetForceName() ?? "(未知门派)"; }   // ← 死代码
+    catch { return "(未知门派)"; }                             // ← 永远不会执行
+}
+```
+
+**这个 `catch` 从来没生效过。** 因为 `MissingMethodException` 是 **JIT 期**异常，
+不是运行时异常：`call` 指令指向已不存在的令牌，CLR 在**编译该方法体时**就要解析它，
+此时方法还没开始执行、**`try` 保护区域尚未建立**，异常直接从方法帧上抛出。
+
+活进程实测（拿真实 `ForceData` 调旧版 `SafeForceName`）：
+
+```
+异常从方法**内部逃逸**出来: MissingMethodException
+
+抛出异常的原始 StackTrace:
+   at ForceOverflowDividend.ForceOverflowRuntime.SafeForceName(ForceData force)
+```
+
+异常逃逸到**调用方**，由调用方的 catch（此处是 Harmony `Postfix`）才兜住，
+于是每结算一次就刷一条 `[ERROR]`。
+
+> ⚠️ **通用教训**：`try/catch` 只能兜住**方法开始执行之后**的异常。
+> 对「调用了不存在的成员」这类**绑定失败**（`MissingMethodException` /
+> `MissingFieldException` / `TypeLoadException`），**在同一方法内**包 try/catch
+> **无效** —— 要么从**调用方**包，要么改用**反射调用**（从根上不产生该异常）。
+
+**正确写法（对未来签名漂移免疫）**：不要编译期绑定，改用反射探测：
+
+```csharp
+foreach (var m in typeof(ForceData).GetMethods())
+{
+    if (m.Name != "GetForceName") continue;
+    var ps = m.GetParameters();
+    if (ps.Length == 1 && ps[0].ParameterType == typeof(bool))
+        return f => m.Invoke(f, new object[] { true }) as string;
+    if (ps.Length == 0)
+        return f => m.Invoke(f, null) as string;
+}
+return null;   // 退化到直接读 forceName 字段
+```
+
+反射**不会**因签名不符而抛异常 —— 找不到就返回 `null`。这正是想要的：
+下次游戏再改签名，只退化成「少一个门派名」，而不是每次调用炸一次。
+最省事的兜底是直接读 `ForceData.forceName` 字段（字段不会因方法签名变化而失效）。
 > ⚠️ **实测 `GameDataController.Instance.forceDataBase[id]` 上的 `resourceStore` 全为 0，
 > 且 `HaveResource(0, 100)` 返回 `false`** —— 与玩家实际拥有大量资源的事实不符。
 > 该实例的 `ownAreas` / `ownHeros` 同样是空的（但 `forceLv` / `mainAreaID` 有真值），
@@ -369,6 +447,7 @@ if (bd.buildTimeLeft > 0 || bd.upgradeTimeLeft > 0
 | `forceDataBase[id]` 的 `resourceStore` 全 0 | **实例可疑**，不是“字段名是假的” | §2.1 |
 | 裸内存地址（CE 找到的）| **每次读档都会变**，不可当锚点 | §2.1 |
 | 资源是 float | 别强转 int | §2.1 |
+| 游戏更新改了**方法签名** | 旧编译的 mod 抛 `MissingMethodException`；**方法内**的 `catch` 拦不住（JIT 期抛出），要改反射 | §2.2a |
 
 ### 3.1 资源（Asset）加载
 

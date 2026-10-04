@@ -162,6 +162,19 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 - **日志 API 是 `Warning(...)` 不是 `Warn(...)`**（只有 `Msg` / `Warning` / `Error`），写成 `Warn` 报 `CS1061`。
 - 跨文件引用日志要写 **`Plugin.Log.Warning(...)`**，不能裸写 `Log`。
 - 碰原生内存需在 csproj 加 `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>`，否则 `CS0227`。
+- **`Thread.ThreadState` / `IsBackground` 在线程终止后会抛 `ThreadStateException`**
+  （`IsAlive` 不会，它只返回 `false`）。这是**通用 .NET 行为，与反编译无关** ——
+  写日志/诊断代码时尤其容易踩：
+
+  ```csharp
+  // ✗ 线程已死时："Thread is dead; state cannot be accessed."
+  Log($"state={t.ThreadState} bg={t.IsBackground}");
+  // ✓ 先判 IsAlive，或把属性访问整个包进 try/catch
+  ```
+
+  本项目实例：退出诊断日志在 `ShutdownWorker()`（会 `Join`，线程已结束）**之后**读这两个属性，
+  于是**退出完全正常却报出一条 `[ERROR]`**。
+  → **任何日志/诊断代码都不允许抛异常**，否则它会伪装成真实故障。
 
 ---
 
@@ -230,6 +243,14 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | `git-filter-repo` 2.47.0 | 历史重写。`/usr/bin/git-filter-repo` |
 | `objdump` / `monodis` / `gdb` | 备用：反汇编 / 程序集 IL / 调试 |
 
+**本仓自建脚本**（`tools/`，直接跑，不需安装）：
+
+| 脚本 | 用途 |
+|---|---|
+| `tools/recompile_mod.sh <Mod.dll>` | 反编译第三方 mod 并重编（全限定输出 + 补引用 + 构建 + 验证）。见 [docs/mod-recompilation.md](docs/mod-recompilation.md) |
+| `tools/il2cpp_unwind.py <dump>` | 从 minidump 做 IL2CPP 栈回溯（绕开 gdb 的无 frame pointer 问题） |
+| `tools/gdb_catch.sh <pid>` | 附加 gdb 抓崩溃现场 |
+
 ---
 
 ## 7. 专题文档索引
@@ -244,6 +265,8 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
 | 看某个 mod 的设计与取舍 | [docs/friendlynoclip.md](docs/friendlynoclip.md)、[docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
+| **反编译别人的 mod 并重新编译**（无源码，要修它 / 改它） | [docs/mod-recompilation.md](docs/mod-recompilation.md) |
+| **游戏退出时卡死 / 进程不退出** | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
 | 查**游戏本身**的机制（音效 / 资源 / 建筑系统） | [docs/game-internals.md](docs/game-internals.md) |
 | 遇到不认识的数值字段（是不是枚举？有哪几档？） | [docs/native-hooks.md](docs/native-hooks.md) 的「不透明字段三步排查法」 |
 
@@ -255,5 +278,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 |---|---|---|
 | FriendlyNoclip | 战斗格子地图允许穿越友方 | [docs/friendlynoclip.md](docs/friendlynoclip.md) |
 | ShiftClickUpgrade | Shift+单击直接升级建筑 | [docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
+| ForceOverflowDividend | （**第三方 mod 修复**）门派资源溢出折现。游戏改签名导致 `MissingMethodException` | [docs/forceoverflowdividend.md](docs/forceoverflowdividend.md) |
+| WuMingPerformanceFix | （**第三方 mod 修复**）修退出卡死：worker 线程 attach 了 IL2CPP 却从不 detach | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
 
 > **通用内容写 `AGENTS.md` / `docs/<专题>.md`，项目内容写 `docs/<项目>.md`，新发现随代码改动一起更新（不是以后补）。**
