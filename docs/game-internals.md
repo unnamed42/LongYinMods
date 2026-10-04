@@ -185,6 +185,31 @@ AreaUnitController.areaTileData : AreaTileData
 | 建筑 | `AreaBuildingIconController`（挂在 `AreaBuildingUnit(Clone)` 上）|
 | 道路 / 空地 | `AreaUnitController`（挂在 `AreaGridRoot/<row>_<col>` 上）|
 
+⚠️ **道路没有 `AreaBuildingIconController`** —— 实测（扬州 areaID=9）24 条道路，
+带图标的 **0** 条。所以「点道路」这条链**必须**挂 `AreaUnitController`。
+
+⚠️ **障碍物两条链都会触发**（它同时挂在两个控制器上，实测确认）——
+这是「一次点击触发多次」的**结构性**原因，不是偶发。
+去重时要用「同一目标指针 + 极短时间窗」，不能只靠时间。
+
+实测分布（同一张图）：
+
+```
+AreaBuildingIconController  114 个：普通建筑(buildingID>=0) + 障碍物(buildingID=-1)
+AreaUnitController          226 个：其中 114 个带 building 引用（与上面重叠 = 障碍物所在格）
+                                    24 条道路 / 77 城墙 / 4 城门 / 7 纯空地 —— 均无图标
+```
+
+| `AreaTileData` 字段 | 含义 |
+|---|---|
+| `building != null` | 建筑**或障碍物**（看 `buildingID`：`-1` = 障碍物）|
+| `areaRoadData != null` | 道路 |
+| 两者皆 `null` | 空地（`tileType=EmptySpace`）|
+
+`tileType` 枚举：`EmptySpace` / `Road` / `MainBuilding` / `Null` / `CityGate` / `CityWall`。
+⚠️ 障碍物所在格的 `tileType` 是 **`EmptySpace`**（不是独立类型）——
+**不能靠 `tileType` 识别障碍物**。
+
 **但锤子模式下的菜单是同一个**：
 
 ```
@@ -197,6 +222,119 @@ Canvas/AreaUIPanel/BuildChoiceGrid
 > 💡 另有 `Canvas/BuildingUIPanel/BuildingUI/ExtraButtonGrid/UpgradeButton`
 > —— 那是**非锤子模式**的另一套建筑 UI，锤子流程不走它。**别搞混。**
 
+### 2.4b ★ 障碍物（残垣/废墟）与普通建筑的区别
+
+**游戏自带权威名单**（别自己猜）：
+
+```csharp
+Il2Cpp.AreaBuildController.AreaObstacleName   // static List<string>
+// 实测 = [杂草, 砂砾, 碎石, 残垣, 废墟, 池泽]
+```
+
+| | 障碍物 | 普通建筑 |
+|---|---|---|
+| `buildingID` | **`-1`** | `>= 0` |
+| `DataBase()` | **`null`** | 有效对象 |
+| `Name(false)` | **抛 NRE** | 正常 |
+| `GetUpgradeCostResource(1f)` | **抛 NRE** | 返回 `List<float>` |
+| `GetObstacleRemoveCostResource(1f)` | 返回 `List<float>` | 也返回（**不能用来区分**）|
+| 菜单按钮 | **只有「拆除」** | 有「升级」等 |
+
+⚠️ **不要用异常当判据**。虽然 `GetUpgradeCostResource` 对障碍物必抛 NRE，
+但那是「用异常做控制流」，慢且脆弱。**直接问 `DataBase() == null`** 即可。
+
+⚠️ **`GameController.ObstacleCanDestroy()` / `BuildingCanUpgrade()` 名字像类型谓词，
+实际是资源谓词** —— 实测一次全场景扫描中，73 个**普通建筑**的
+`ObstacleCanDestroy` **全部返回 `true`**。它们回答的是「钱够不够」，
+**不能**用来区分障碍物。（`AreaBuildingIconController.Update` 用它们决定
+提示精灵显示与否 —— 那是「此刻能不能」的指示，不是身份。）
+
+### 2.4c ★★ 菜单按钮**会残留**：`interactable` 只覆盖门槛，不覆盖「进行中」
+
+> ⚠️ 这一节的内容经过一次**结论反转**，值得完整读。
+> 一开始我们以为「`interactable` 就是游戏的权威前置检查，照着用就行」——
+> **对门槛类条件成立，对「进行中」状态不成立**。
+
+`AreaBuildController.SetBuildTarget(GameObject)` 建菜单时确实会调
+`Selectable.set_interactable(...)`（反编译调用图可见），
+所以 `interactable` 反映了**门槛类**条件：资源不足 / 已满级 / ForceLv 不够 / 官府等级不够。
+
+**但按钮对象不会被销毁 —— 游戏只是复用/改 `enabled`。**
+于是切换状态后，菜单里会残留上一个状态的按钮，而游戏**不会为它们重算 `interactable`**。
+
+#### 实测：三种「进行中」状态下的菜单（佛山镇 areaID=63 + 扬州 areaID=9）
+
+| 状态 | 字段 | 菜单内容 | 有可点的「升级」？ |
+|---|---|---|---|
+| 空闲 | 全 `0` | 拆除 / 迁移 / 升级（3 个，全 `enabled=True` `interactable=True`）| 是（正常）|
+| **拆除中** | `destroyTimeLeft=1` | 拆除 / 迁移 / **升级** / 取消拆除（4 个，**全 `enabled=True` `interactable=True`**）| 🔴 **有** |
+| **升级中** | `upgradeTimeLeft=1` | **只有「取消升级」** | ✅ 没有 |
+| **迁移中** | `buildTimeLeft=1` | **菜单根本不打开**（`grid.activeInHierarchy=False`，0 按钮）| ✅ 没有 |
+
+**结论：只有「拆除中」会残留可点的「升级」按钮。**
+升级中 / 迁移中游戏自己处理对了（迁移中甚至不给菜单）。
+
+拆除中的完整复现（木匠 `id=32`，点「拆除」后 `dLeft: 0→1`）：
+
+```
+[拆除]     enabled=True interactable=True
+[迁移]     enabled=True interactable=True
+[升级]     enabled=True interactable=True   <-- 残留，可点，而 CanUpgrade() 仍为 True
+[取消拆除] enabled=True interactable=True
+```
+
+#### 判别残留按钮：用 **`Button.enabled`**，不是 `IsActive`
+
+实测同一菜单里会**并存两个同名按钮**：
+
+```
+[取消拆除] enabled=False interactable=True   <-- 残留（旧的，被禁用）
+[取消拆除] enabled=True  interactable=True   <-- 真正生效的
+```
+
+| 字段 | 残留按钮 | 当前按钮 | 能判别？ |
+|---|---|---|---|
+| `activeSelf` | True | True | ❌ |
+| `activeInHierarchy` | True | True | ❌ |
+| `interactable` | **True** | True | ❌ |
+| **`enabled`** | **False** | **True** | ✅ |
+
+⚠️ **而且 `enabled` 的值会随时机变化** —— 同一栋建筑（园林 `id=29`）
+在同一次拆除中，两次读到的残留「升级」按钮不一样：
+
+| 时机 | 残留「升级」的 `enabled` |
+|---|---|
+| 点「拆除」后**第一次**打开菜单 | **`True`** ← 只靠 `enabled` 会漏！|
+| 稍后再次打开同一菜单 | **`False`** ← `enabled` 过滤生效 |
+
+⇒ **`enabled` 只能当作“尽力而为”的辅助过滤，不能作为唯一防线。**
+它读的是 **UI 对象状态**（会被复用 / 延迟重算影响）；
+真正可靠的 ③ 读的是 **数据**（不会被 UI 复用影响）。
+#### 所以判断「能不能操作」需要三层
+
+```csharp
+if (button == null) return;                        // ① 菜单里没有
+if (!button.enabled || !button.interactable) return; // ② 残留 / 门槛不满足
+if (bd.buildTimeLeft > 0 || bd.upgradeTimeLeft > 0
+    || bd.destroyTimeLeft > 0) return;             // ③ 进行中（游戏不重算，只能自己判）
+```
+
+> 📌 **泛化教训**：
+> 「消费系统的结论，不要自己重算」这个原则**只在系统真的重算了的前提下成立**。
+> 系统的结论可能是**陈旧的**——尤其当它复用对象、只增量改状态时。
+> 用之前先问一句：**这个结论是什么时候算的？之后状态变过吗？**
+
+配套：`CanUpgrade()` 在这三种状态下**都可能返回 `True`**（它只算门槛类条件），
+所以它既不能代替 ② 也不能代替 ③。
+
+### 2.4d ⚠️ 排查提示：菜单会自己重建，读数必须同调用内完成
+
+`BuildChoiceGrid` 的内容会在游戏自己的 `Update` 里重建。
+**跨调用**（两次 MCP `execute_csharp`）读到的按钮集合**会变** ——
+排查时出现过「上一次读到 4 个按钮、下一次读到 1 个」的自相矛盾结果。
+
+→ **必须在同一次调用里完成「打开菜单 + 读取按钮」**，否则读数不可信。
+
 ### 2.5 升级状态字段：`upgradeTimeLeft`
 
 `AreaBuildingData` 与 `AreaRoadData` **都有同名的 `upgradeTimeLeft`**：
@@ -208,6 +346,14 @@ Canvas/AreaUIPanel/BuildChoiceGrid
 
 ⚠️ 但 **`CanUpgrade()` 在“已在升级中”时仍返回 `true`** ——
 **不能只靠它**判断“能不能升”。
+
+`AreaBuildingData` 上的三个「进行中」计数器**互不相干**，要**全部**检查：
+
+| 字段 | 含义 |
+|---|---|
+| `buildTimeLeft` | 建造 / **迁移**中 |
+| `upgradeTimeLeft` | 升级中 |
+| `destroyTimeLeft` | 拆除中 |
 
 ---
 

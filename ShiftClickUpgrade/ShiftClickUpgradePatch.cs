@@ -21,12 +21,16 @@ namespace Unnamed42.ShiftClickUpgrade;
 /// </summary>
 internal static class ShiftClickUpgradePatch
 {
-    /// <summary>候选钩子的触发计数（不受诊断开关门控 —— 取证仪表必须永不受门控）。</summary>
-    private static int _iconClickHits;
-
-    /// <summary>地块（含道路）点击次数 —— 与建筑图标分开计，便于区分两条入口。</summary>
-    private static int _unitClickHits;
+    /// <summary>
+    /// 锤子（建造模式）切换计数 —— 只在 `diagnostics` 下的探针日志里用。
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ 这里**没有**“图标点击次数 / 地块点击次数”两个计数器 ——
+    /// 它们随着日志收敛被删了：那两条日志改为只在 Shift 点击时打，
+    /// 不再需要一个“第 N 次”的序号（序号对排查没有增量价值）。
+    /// </remarks>
     private static int _buildModeHits;
+
     private static int _playerUpgradeHits;
     private static int _upgradeButtonHits;
     private static int _sureUpgradeHits;
@@ -227,31 +231,28 @@ internal static class ShiftClickUpgradePatch
 
         try
         {
-            _iconClickHits++;
 
             bool shift = ShiftHeld;
             AreaBuildingData? data = __instance?.buildingData;
 
-            // 受 `diagnostics` 门控。
+            // 【日志收敛 —— 用户反馈“日志有点多”】
+            //
+            // 原先这里**一次点击连打三条**（图标点击 / Shift 点击 / 待操作目标），
+            // 内容高度重叠。现在合为一条：只在**真正要处理时**（Shift）打。
             //
             // ⚠️ 这条曾经是**不受门控**的“补丁是否触发”证据（本项目吃过
             //    「日志被门控 → grep=0 → 误判补丁零触发」的亏）。
-            //    但它挂在**每次点击建筑**的高频路径上，功能稳定后没必要常开；
-            //    排查时把 `diagnostics` 打开即可。
-            Plugin.LogInfo(() =>
-                $"[探针·图标点击] 第 {_iconClickHits} 次 | shift={shift} | {DescribeBuilding(data)}");
-
-            // 没按 Shift → 完全不管，放行原逻辑（行为与没装 mod 时一致）。
+            //    所以保留一条 Msg 级的“首触发”证据（见 TriggerMenuAction）。
+            //
+            // 没按 Shift → 完全不管（行为与没装 mod 时一致），**不打印**：
+            // 它是最常见的点击，打出来纯属噪声。
             if (!shift)
             {
                 return true;
             }
 
-            // ⚠️ 这里原本写成 `{DescribeBuilding(data)}` 与 GameObject 名拼在一起，
-            //    少了一个开括号 —— 日志会变成「… name=药房AreaBuildingUnit(Clone)）」。
-            //    日志文本出错不影响逻辑，但**排查时会把两个字段看成一个**，已修。
             Plugin.LogInfo(() =>
-                $"[探针·Shift 点击] 命中建筑图标：{DescribeBuilding(data)}" +
+                $"[Shift+单击升级] 命中建筑图标：{DescribeBuilding(data)}" +
                 $"（物体={__instance?.gameObject?.name ?? "?"}）");
 
             // 闸①：功能开关。
@@ -296,52 +297,46 @@ internal static class ShiftClickUpgradePatch
                 return true;
             }
 
-            // 闸③：建筑自己得说可升级。
-            // 先用 `CanUpgrade()` 筛一道 —— 不可升级时**放行原 UI**，
-            // 让玩家拿到游戏原本的反馈（而不是我们的静默失败）。
-            bool canUpgrade;
+            // ── 闸③：区分「障碍物」与「普通建筑」，决定 Postfix 点哪个按钮 ──────
+            //
+            // 【为什么不在这里做前置检查 —— 用户的设计】
+            //
+            // 用户提出：**「只要在 Postfix 里找到按钮，找得到且可点就 Invoke，
+            // 前置检查都不需要，那是游戏本身就做了的。」**
+            //
+            // 方向是对的：菜单是 `AreaBuildController.SetBuildTarget()` 刚建好的，
+            // 它自己调了 `Selectable.set_interactable(...)`，所以 `interactable`
+            // **确实**反映了游戏算好的**门槛类**条件（资源 / 等级 / 满级）。
+            // 我们以前在这里重算 `CanUpgrade()`，是在重复实现游戏已有的结论。
+            //
+            // ⚠️ **但「只看 interactable」不够** —— 后来实测发现：
+            //    菜单按钮**复用不销毁**，游戏**不会为残留按钮重算 interactable**，
+            //    于是「拆除中」的建筑菜单里会留下一个**可点的「升级」按钮**。
+            //    详见 TriggerMenuAction 里那三层判据（尤其是 ③）。
+            //
+            // → 所以这里**只**留一件事：判断该点「升级」还是「拆除」。
+            //    真正的判据分层放在 TriggerMenuAction 里，那里有完整理由。
+            //
+            // 【怎么区分】用**游戏自己的障碍物名单**：
+            //   `AreaBuildController.AreaObstacleName`（static List<string>）
+            //     实测 = [杂草, 砂砾, 碎石, 残垣, 废墟, 池泽]
+            //   这是 Lua 侧填充的官方名单，比任何间接特征都权威。
+            //
+            // ⚠️ 名单在 C# 侧只有声明、没有引用（反编译可见），
+            //    所以**不能**指望它一定非空 —— 退化时看 `DataBase() == null`。
+            bool isObstacle = IsObstacle(data);
 
-            try
-            {
-                canUpgrade = data.CanUpgrade();
-            }
-            catch (Exception e)
-            {
-                Plugin.LogError($"[Shift+单击升级] CanUpgrade() 抛异常，放行：{e.GetType().Name}");
-                return true;
-            }
+            // 📌 【日志收敛】与上面那条“命中建筑图标”合并成一个信息块 ——
+            //    这里只补“判定结果”（是建筑还是障碍物、将点哪个按钮），
+            //    不再重复打 buildingID/lv/name。
+            Plugin.LogInfo(() =>
+                $"[Shift+单击升级] 判定为 {(isObstacle ? "障碍物 -> 拆除" : "建筑 -> 升级")}");
 
-            if (!canUpgrade)
-            {
-                Plugin.LogInfo(() => $"[Shift+单击升级] 不可升级，放行原 UI：{DescribeBuilding(data)}");
-                return true;
-            }
-            // 闸④（防重复）与真正的升级都放到 **Postfix** ——
-            // 因为菜单是 `OnClick` 执行过程中才创建的（与道路同构，见上方注释）。
+            // `__state` 携带「是否为障碍物」—— Postfix 靠它决定点「拆除」还是「升级」。
+            // 同时用一个显式标志告诉 Postfix「这次点击归我们管」。
+            __state = isObstacle;
+            _handledThisClick = true;
 
-            // ── ★ 与道路统一：不直接调 callback，而是走 UI 按钮 ────────────────
-            //
-            // 【为什么改成这样】用户提议统一两条路径，并先验证了可行性。
-            //
-            // 实测（2026-10-04）关键发现：
-            //   **建筑与道路共用同一个菜单** `Canvas/AreaUIPanel/BuildChoiceGrid`。
-            //   锤子开启时点建筑 → 同样的 BuildChoiceGrid 出现（拆除/迁移/升级）。
-            //
-            //   点它的「升级」按钮后：
-            //     摊贩: upgradeTimeLeft 0 -> 1       ← 真的升级
-            //     音效: Woosh + WoodWork + TabButton ← 与手动点击完全一致
-            //
-            // 所以建筑也可以（且应该）走同一条路径 ——
-            // 这样就不再需要 `PlayerUpgradeBuilding` + 手工补音效那套了。
-            //
-            // ⚠️ **与道路一样，不能在 Prefix 里做**：
-            //   菜单按钮是 `OnClick` 执行过程中才创建/激活的。
-            //   实测建筑：调用前 UpgradeButton 的 activeInHierarchy=False，
-            //   需要先放行原方法让游戏把菜单建出来。
-            //   → 记下意图（__state），在 Postfix 里触发。
-
-            // 已在升级中 → 不重复触发（闸④，在 Postfix 里判）。
-            __state = true;
             return true;
         }
         catch (Exception e)
@@ -370,7 +365,19 @@ internal static class ShiftClickUpgradePatch
         AreaBuildingIconController __instance,
         bool __state)
     {
-        if (!__state)
+        // Prefix 没标记（非 Shift）→ 什么都不做。
+        //
+        // ⚠️ `__state` 现在携带的是「是否为障碍物」，**不能**再拿它表达
+        //    「要不要处理」—— 非 Shift 的点击也会走到这里，而它的 `__state`
+        //    同样是 false，会与「普通建筑」混淆，导致误点「升级」。
+        //    所以另用一个显式标志（同 §4.6 的“显式 has-happened 标志”教训）。
+        bool handled = _handledThisClick;
+
+        // ⚠️ 立刻清标志：这是“一次性”的点击标记，不能留给下一次无关点击。
+        //    放在 finally 里没用（下面还有 return），所以在这里就地清。
+        _handledThisClick = false;
+
+        if (!handled)
         {
             return;
         }
@@ -382,61 +389,35 @@ internal static class ShiftClickUpgradePatch
                 return;
             }
 
-            AreaBuildingData? data = null;
-
-            try
-            {
-                data = __instance?.buildingData;
-            }
-            catch
-            {
-                // 对象可能已被销毁。
-            }
-
-            if (data == null)
-            {
-                return;
-            }
-
-            // ── 闸④：防重复触发（与道路同构）───────────────────────────
-            int upgradeTimeLeft;
-
-            try
-            {
-                upgradeTimeLeft = data.upgradeTimeLeft;
-            }
-            catch
-            {
-                upgradeTimeLeft = 0;
-            }
-
-            if (upgradeTimeLeft > 0)
-            {
-                Plugin.LogInfo(() =>
-                    $"[Shift+单击升级] 已在升级中（剩 {upgradeTimeLeft}），不重复触发：{DescribeBuilding(data)}");
-
-                CloseBuildMenuSafely();
-                return;
-            }
-
-            // 同一次点击里，「地块」的 Postfix 可能已经升级过了（见 ShouldSkipAsDuplicate）。
+            // ── 去重：同一次点击的两个接收者会各发一次事件 ─────────────────
+            //
+            // ⚠️ 这是**结构性**的，不是偶发：实测障碍物同时挂在
+            //    `AreaBuildingIconController` 与 `AreaUnitController` 上，
+            //    两个 `OnClick` 都会收到同一次鼠标点击。
+            //
             // 用**目标对象指针**做主判据：同一次点击的两个接收者指向同一栋建筑。
             if (ShouldSkipAsDuplicate(GetObjectPtr(__instance)))
             {
                 return;
             }
 
-            // 此刻菜单已建好，一定能找到「升级」按钮（实测 23/23 成功）。
+
+
+            // 此刻菜单已建好，按目标类型选按钮：
+            //   障碍物   -> 「拆除」
+            //   普通建筑 -> 「升级」
             //
-            // ⚠️ **不做回退**（旧版本会回到直接调 `PlayerUpgradeBuilding`，已删除）。
-            // 理由：回退会**绕过按钮的 `interactable` 检查**，
-            // 而 `interactable=false` 恰恰意味着“前置条件不满足”
-            // （资源不足 / 已满级 / ForceLv 不够）。
-            // 那样就与闸②③的语义相矛盾：本来该拦住的情况反而能升级。
+            // ⚠️ **不做前置检查，也不做回退**（旧版本会回到直接调
+            //    `PlayerUpgradeBuilding`，已删除）。
             //
-            // 所以按钮不可用时**什么都不做**，交互回到“点了没反应”——
-            // 与玩家在原生 UI 里点一个灰按钮的体验一致。
-            TryUpgradeViaUiButton(GetObjectPtr(__instance));
+            //    回退会**绕过按钮的 `interactable` 检查**，而 `interactable=false`
+            //    恰恰意味着“游戏的结论是不满足条件”（资源不足 / 满级 / 施工中 /
+            //    ForceLv 不够）。那样就与“以游戏结论为准”的设计相矛盾。
+            //
+            //    按钮不可用时**静默不动**（用户决定）：
+            //    那是游戏的正常业务结论，不是异常，不值得刷日志。
+            //    只有开了 `diagnostics` 时才留一条痕迹便于排查“按了没反应”。
+            TriggerMenuAction(GetObjectPtr(__instance), __state);
         }
         catch (Exception e)
         {
@@ -472,7 +453,6 @@ internal static class ShiftClickUpgradePatch
 
         try
         {
-            _unitClickHits++;
 
             bool shift = ShiftHeld;
             AreaTileData? tile = null;
@@ -501,19 +481,30 @@ internal static class ShiftClickUpgradePatch
             }
 
             // 受 `diagnostics` 门控。
+            //
             // `isRoad` 是关键 —— 它区分「建筑格」（走另一个补丁）与「道路格」，
             // 排查“点错地方”时打开 diagnostics 即可看到。
-            Plugin.LogInfo(() =>
-                $"[探针·地块点击] 第 {_unitClickHits} 次 | shift={shift} | isRoad={isRoad}" +
-                $" roadLv={roadLv} | 物体={__instance?.gameObject?.name ?? "?"}");
+            //
+            // 📌 【日志收敛】同样只在 **Shift 点击**时打 —— 该补丁挂在
+            //    每一个地块上（实测 226 个），普通点击不打印才合理。
+            if (shift)
+            {
+                Plugin.LogInfo(() =>
+                    $"[Shift+单击升级] 命中地块：isRoad={isRoad} roadLv={roadLv}" +
+                    $"（物体={__instance?.gameObject?.name ?? "?"}）");
+            }
 
-            // 非道路（空地等）不处理 —— 只放行。
+
+            // 非道路（空地 / 城墙 / 城门等）不处理 —— 只放行。
+            //
+            // 【为什么空地不用特判】用户的设计使然：空地本来就没有
+            // 「升级」也没有「拆除」按钮，Postfix 里自然找不到 → 静默不动。
+            // 但先在 Prefix 拦住更省事（不必白跑一趟 Postfix 的扫描）。
             if (!shift || !isRoad)
             {
                 return true;
             }
-
-            // ── ★ 不能在这里升级 ──────────────────────────────────────────
+            // ── ★ 不能在这里升级（与建筑同构）───────────────────────────
             //
             // 【为什么】实测（2026-10-04）：菜单的「升级」按钮是游戏在
             // `OnClick` **执行过程中**才 Instantiate 的。
@@ -522,20 +513,17 @@ internal static class ShiftClickUpgradePatch
             //   调用后可见的「升级」按钮数 = **1**
             //
             // 所以在 **Prefix** 里必然找不到按钮 —— 这正是
-            // 用户报告的「需要点两次」：第一次只能把菜单弹出来，
-            // 第二次菜单已在，才能找到按钮并升级。
+            // 用户报告的「需要点两次」。
             //
-            // → 正确做法：Prefix 只**记下意图**，真正的升级放到
-            //   **Postfix**（原方法跑完、菜单已创建）里做。
-            //   用 `__state` 把意图传递给 Postfix（**不用静态字段**）——
+            // → Prefix 只**记下意图**，按钮留到 Postfix 里点。
+            //   用 `__state` 传递（**不用静态字段**）——
             //   静态字段会被并发/重入污染，`__state` 是 Harmony 官方的
             //   per-invocation 机制（见 docs/harmony-il2cpp.md §5.4）。
-            if (shift && isRoad)
-            {
-                __state = true;
-            }
+            __state = true;
 
             // 放行原方法：让游戏正常创建菜单。
+            // （Postfix 里拿完按钮后，菜单会被收拾掉）
+
             // （Postfix 里拿到按钮后我们再把菜单关掉）
             return true;
         }
@@ -565,12 +553,14 @@ internal static class ShiftClickUpgradePatch
         bool __state)
     {
         // Prefix 没标记（非 Shift、非道路）→ 什么都不做。
+        //
+        // ⚠️ 道路的 `__state` 就是“要不要处理”（与建筑不同 ——
+        //    建筑那边 `__state` 携带“是否障碍物”）。因为道路只有升级一种操作，
+        //    不存在需要传递的第二维信息。
         if (!__state)
         {
             return;
         }
-
-
         try
         {
             if (!Plugin.Enabled.Value || Plugin.ProbeOnly.Value)
@@ -578,52 +568,22 @@ internal static class ShiftClickUpgradePatch
                 return;
             }
 
-            // ── 闸④：防重复触发（与建筑同构，见 §4.6）─────────────────────
-            //
-            // 【现象】用户实测：前两次 Shift 点击都能触发升级，第三次才会被拦。
-            // （升级行为本身只升一级是对的，但多播一次升级音/多走一遗流程仍是噪声）
-            //
-            // 【根因】与建筑一个道理：`AreaRoadData` 的 `upgradeTimeLeft`
-            //   是“升级剩余时间” —— 但按钮在菜单里的可见性/可交互性
-            //   不一定会立即反映“已在升级中”，所以得自己搪一道。
-            //
-            //   0  = 空闲（可升级）
-            //   >0 = **正在升级中**
-            int roadLv = -1;
-            int upgradeTimeLeft = 0;
-
-            try
-            {
-                AreaRoadData? road = __instance?.areaTileData?.areaRoadData;
-
-                if (road != null)
-                {
-                    roadLv = road.roadLv;
-                    upgradeTimeLeft = road.upgradeTimeLeft;
-                }
-            }
-            catch
-            {
-                // 忽略：只影响日志里的数值。
-            }
-
-            if (upgradeTimeLeft > 0)
-            {
-                // 已在施工 → 不重复升级，也不弹菜单（与建筑行为一致）。
-                Plugin.LogInfo(() =>
-                    $"[Shift+单击升级] 道路已在升级中（剩 {upgradeTimeLeft}），不重复触发。");
-
-                CloseBuildMenuSafely();
-                return;
-            }
-            // 同一次点击里，「建筑图标」的 Postfix 可能已经升级过了（见 ShouldSkipAsDuplicate）。
+            // ── 去重（与建筑同构）────────────────────────────────────
+            // 同一次点击里，若「地块」与「建筑图标」都收到事件，
+            // 两个 Postfix 会指向同一目标 —— 用目标指针 + 时间窗拦掉。
             if (ShouldSkipAsDuplicate(GetObjectPtr(__instance)))
             {
                 return;
             }
 
-            // 此刻菜单已建好，能找到「升级」按钮。
-            TryUpgradeViaUiButton(GetObjectPtr(__instance));
+            // 此刻菜单已建好，一定能找到「升级」按钮。
+            //
+            // 道路只有升级一种操作，所以传 `false`（非障碍物）→ 点「升级」。
+            //
+            // ⚠️ **不再手工判 `upgradeTimeLeft`**（旧版在这里拦“已在升级中”）。
+            //    那是重复实现游戏的结论 —— 施工中时游戏的「升级」按钮
+            //    本身就是 `interactable=false`，`TriggerMenuAction` 会静默跳过。
+            TriggerMenuAction(GetObjectPtr(__instance), false);
         }
         catch (Exception e)
         {
@@ -718,62 +678,343 @@ internal static class ShiftClickUpgradePatch
     /// 一旦确认主路径覆盖了全部场景，回退就是纯负担（还得为它维护语义）。
     /// </para>
     /// </summary>
-    private static void TryUpgradeViaUiButton(long targetPtr)
+    private static void TriggerMenuAction(long targetPtr, bool isObstacle)
     {
         try
         {
-            UnityEngine.UI.Button? upgradeButton = FindActiveUpgradeButton();
+            // ── 决定点哪个按钮 ──────────────────────────────────────
+            //
+            // 【判据】`isObstacle`（调用方用 `IsObstacle()` 算好）：
+            //   障碍物（残垣/废墟/杂草…）-> 「拆除」
+            //   普通建筑 / 道路          -> 「升级」
+            //
+            // 实测：障碍物菜单里**只有**「拆除」，普通建筑菜单里才有「升级」。
+            //
+            // ⚠️ 判据是**三层**，缺一不可 —— 详见下方各自的理由。
+            string label = isObstacle ? "拆除" : "升级";
 
-            if (upgradeButton == null)
+            UnityEngine.UI.Button? button = FindActiveChoiceButton(label);
+
+            // ── ① 菜单里没有这个按钮 ────────────────────────────────
+            //
+            // 正常情况（空地什么都没有、某种建筑暂不提供该操作）。**静默**。
+            if (button == null)
             {
-                Plugin.LogInfo(() => "[Shift+单击升级] 未找到「升级」按钮（菜单未开？）。");
+                Plugin.LogInfo(() => $"[Shift+单击升级] 菜单里没有「{label}」按钮，静默跳过。");
                 return;
             }
 
-            if (!upgradeButton.interactable)
+            // ── ② 残留按钮过滤 + 门槛检查 ───────────────────────────
+            //
+            // 【`enabled` 是干什么的】游戏的菜单按钮**不会销毁，只会复用**。
+            // 实测同一菜单里会并存两个同名按钮：
+            //
+            //     [取消拆除] enabled=False interactable=True   <- 残留（旧的）
+            //     [取消拆除] enabled=True  interactable=True   <- 真正生效的
+            //
+            // ⚠️ 判别残留**不能**用 `activeSelf` / `activeInHierarchy` ——
+            //    实测残留按钮这两个值都是 **True**（只是被禁用，不是被隐藏）。
+            //    也不能用 `interactable` —— 残留按钮的它也是 **True**。
+            //    唯一能区分的是 **`enabled`**。
+            //
+            // ⚠️ **但 `enabled` 的值会随时机变化，不能作为唯一防线！**
+            //    同一栋建筑（园林 id=29）在同一次拆除中，两次读到的
+            //    残留「升级」按钮不一样：
+            //
+            //      点「拆除」后第一次打开菜单 -> enabled=**True**  <- 这层会漏
+            //      稍后再次打开同一菜单       -> enabled=False     <- 这层生效
+            //
+            //    所以这里只是“尽力而为”的辅助 —— 真正可靠的兜底是 ③。
+            //    理由：本层读的是 **UI 对象状态**（受复用/延迟重算影响），
+            //    而 ③ 读的是 **数据**（不受 UI 复用影响）。
+            if (!button.enabled)
             {
-                // ⚠️ **不做回退** —— 按钮不可用说明前置条件不满足
-                // （资源不足 / 满级 / ForceLv 不够），此时去直接调
-                // `PlayerUpgradeBuilding` 会绕过这个检查，语义就错了。
-                Plugin.LogInfo(() => "[Shift+单击升级] 「升级」按钮不可用（前置条件不满足），不做任何事。");
+                Plugin.LogInfo(() =>
+                    $"[Shift+单击升级] 「{label}」是残留按钮（enabled=false），静默跳过。");
+
+                return;
+            }
+
+            // `interactable` 反映的是**门槛类**条件 ——
+            // 资源不足 / 已满级 / ForceLv 不够 / 官府等级不够。
+            // 这类条件游戏在切换目标时**会**重算，所以信它没问题。
+            if (!button.interactable)
+            {
+                // ⚠️ **静默不动**（用户决定）：这是游戏的正常业务结论，不是异常。
+                // 只有开了 `diagnostics` 时才留一条，便于排查“按了没反应”。
+                Plugin.LogInfo(() =>
+                    $"[Shift+单击升级] 「{label}」按钮不可用（游戏判定门槛不满足），静默跳过。");
+
+                return;
+            }
+
+            // ── ③ 进行中状态（**必须自己判**）────────────────────────
+            //
+            // 【为什么 ② 挡不住这一层 —— 本轮最大的坑】
+            //
+            // `interactable` **只**覆盖门槛，**不**覆盖「进行中」。
+            // 因为游戏复用按钮时**不会重算**它们的 `interactable`，
+            // 于是「拆除中」的建筑菜单里会残留一个**可点的「升级」按钮**。
+            //
+            // 实测（木匠 id=32，点「拆除」后 destroyTimeLeft: 0 -> 1）：
+            //
+            //     [拆除]     enabled=True interactable=True
+            //     [迁移]     enabled=True interactable=True
+            //     [升级]     enabled=True interactable=True   ← 三层里前两层都过了！
+            //     [取消拆除] enabled=True interactable=True
+            //
+            // 而 `CanUpgrade()` 此时**仍返回 True**（它只算门槛类条件），
+            // 所以它也帮不上忙。→ 只能老老实实判这三个倒计时。
+            //
+            // 【三种状态的实测结论】只有「拆除中」会中招：
+            //     升级中 (uL>0) -> 菜单只有「取消升级」      -> 本来就没有「升级」
+            //     迁移中 (bL>0) -> 菜单根本不打开（0 按钮）  -> 本来就没有「升级」
+            //     拆除中 (dL>0) -> 菜单里有残留的「升级」    -> **危险**
+            //   但三种都判，因为这是**游戏不保证**的领域，不能依赖巧合。
+            if (IsInProgress(out string progressReason))
+            {
+                Plugin.LogInfo(() =>
+                    $"[Shift+单击升级] 目标{progressReason}，不触发「{label}」：静默跳过。");
+
                 return;
             }
 
             // ★ 等价于“玩家点了这个按钮”—— 走完整原生链路。
             //
-            // 【日志分级】这是「功能生效」的证据，所以**不受** `diagnostics` 门控。
-            // 但它每次升级都会打一行 —— 玩家快速点十几下时会刷屏。
-            // 折中：只在**首次**成功时用 Msg（确认功能确实在工作），
-            // 之后的归入 `diagnostics`。
+            // 【日志分级 —— 用户要求“日志太多，控制到 diagnostics 里”】
+            //
+            // 这是最高频的一条（每次 Shift 点击都打），所以分两级：
+            //   · 整个会话的**第一次**成功 -> Msg（不受门控）
+            //     本条的作用是回答「补丁到底有没有在工作」。
+            //     只打一次就足以证明，之后全是噪声。
+            //   · 其余全部 -> LogInfo（受 `diagnostics` 门控）
+            //
+            // ⚠️ 早期写法的错误在于：「首次」用 Msg、之后走 LogInfo ——
+            //    看似对，但 LogInfo 在 `diagnostics=true` 时**仍然会打**，
+            //    而排查时恰恰会把 diagnostics 打开，于是减噪完全失效。
+            //    真正的分级标准应该是「**这条日志当下有没有价值**」，
+            //    而不是「有没有开 diagnostics」。
             if (!_hasUpgradeTriggered)
             {
                 Plugin.Log.Msg(
-                    $"[Shift+单击升级] ★ 通过 UI 按钮触发升级（首次，按钮={upgradeButton.gameObject.name}）");
+                    $"[Shift+单击升级] ★ 功能生效：已通过 UI 按钮触发「{label}」" +
+                    $"（整个会话只报这一次；后续日志需开 diagnostics）");
             }
             else
             {
                 Plugin.LogInfo(() =>
-                    $"[Shift+单击升级] ★ 通过 UI 按钮触发升级（按钮={upgradeButton.gameObject.name}）");
+                    $"[Shift+单击升级] ★ 通过 UI 按钮触发「{label}」（按钮={button.gameObject.name}）");
             }
 
-            upgradeButton.onClick.Invoke();
+            button.onClick.Invoke();
 
             // 记下这次触发，供去重用（见 MarkUpgradeTriggered）。
             // 传入目标指针，使去重能区分“同一次点击的两个事件”与“玩家点了另一处”。
             MarkUpgradeTriggered(targetPtr);
-
-            return;
         }
         catch (Exception e)
         {
-            // 交给调用方决定回退 —— 不在这里擅自再升一次。
-            Plugin.LogError($"[Shift+单击升级] UI 触发升级失败：{e}");
-            return;
+            // 不在这里擅自重试 —— 触发失败就失败，交给调用方收尾。
+            Plugin.LogError($"[Shift+单击升级] UI 触发失败：{e}");
+        }
+    }
+
+    /// <summary>
+    /// 当前建造菜单所指向的目标是否正「进行中」（建造 / 迁移 / 升级 / 拆除）。
+    ///
+    /// <para>
+    /// 【为什么必须自己判】游戏的「升级」按钮 **`interactable` 只覆盖门槛类条件**
+    /// （资源 / 等级 / 满级），**不覆盖进行中状态** —— 因为菜单按钮是复用对象，
+    /// 游戏切换状态时**不会重算**它们的可用性。
+    /// 实测：拆除中的建筑菜单里残留着一个 `enabled=True`、`interactable=True`
+    /// 的「升级」按钮（见 docs/shiftclickupgrade.md §4.12）。
+    /// </para>
+    ///
+    /// <para>
+    /// 【为什么读菜单目标而不是传进来的参数】建筑的 Postfix 手里有
+    /// <c>AreaBuildingData</c>，道路的 Postfix 手里只有 <c>AreaRoadData</c>。
+    /// 两者字段名不同（<c>road.upgradeTimeLeft</c> vs 建筑的三个计数器），
+    /// 与其加两个重载，不如统一从**菜单当前目标**读 —— 那本来就是“我们要操作的东西”。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 整个函数不得抛异常：读不到就当**不忙**（宁可放过，不可误拦正常功能）。
+    /// </para>
+    /// </summary>
+    /// <param name="reason">非空表示进行中的原因（仅用于日志）。</param>
+    private static bool IsInProgress(out string reason)
+    {
+        reason = string.Empty;
+
+        try
+        {
+            AreaBuildController? abc = AreaBuildController.Instance;
+            GameObject? target = abc?.buildTargetObj?.TryCast<GameObject>();
+
+            if (target == null)
+            {
+                return false;
+            }
+
+            // 目标可能是「建筑图标」（建筑 / 障碍物），也可能是「地块」（道路）。
+            AreaBuildingIconController? icon =
+                target.GetComponent<AreaBuildingIconController>();
+
+            if (icon != null)
+            {
+                AreaBuildingData? bd = icon.buildingData;
+
+                if (bd != null)
+                {
+                    if (bd.buildTimeLeft > 0)
+                    {
+                        reason = $"正在建造/迁移中（剩 {bd.buildTimeLeft}）";
+                        return true;
+                    }
+
+                    if (bd.upgradeTimeLeft > 0)
+                    {
+                        reason = $"正在升级中（剩 {bd.upgradeTimeLeft}）";
+                        return true;
+                    }
+
+                    if (bd.destroyTimeLeft > 0)
+                    {
+                        reason = $"正在拆除中（剩 {bd.destroyTimeLeft}）";
+                        return true;
+                    }
+
+                    return false;
+                }
+            }
+
+            // 道路：走 AreaUnitController 那条链，数据在 areaTileData.areaRoadData。
+            AreaUnitController? unit = target.GetComponent<AreaUnitController>();
+
+            AreaRoadData? road = unit?.areaTileData?.areaRoadData;
+
+            if (road != null && road.upgradeTimeLeft > 0)
+            {
+                reason = $"道路正在升级中（剩 {road.upgradeTimeLeft}）";
+                return true;
+            }
+        }
+        catch (Exception e)
+        {
+            // 读不到就当不忙 —— 不阻断正常功能。
+            Plugin.LogInfo(() => $"[Shift+单击升级] 读进行中状态失败，忽略：{e.GetType().Name}");
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 判断一个建筑数据是不是**障碍物**（残垣 / 废墟 / 杂草 / 砂砾 / 碎石 / 池泽）。
+    ///
+    /// <para>
+    /// 【判据来源】用**游戏自己的官方名单**：
+    /// <c>AreaBuildController.AreaObstacleName</c>（static List&lt;string&gt;）。
+    /// 实测内容 = [杂草, 砂砾, 碎石, 残垣, 废墟, 池泽]。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 两点注意：
+    /// </para>
+    /// <list type="number">
+    ///   <item>该字段是 <b>static</b> —— 用 <c>Instance.AreaObstacleName</c> 会 CS0176。</item>
+    ///   <item>它在 C# 侧只有声明、没有引用（反编译可见），由 Lua 侧填充 ——
+    ///         所以可能为空/未初始化，此时**退化**到用 <c>DataBase() == null</c> 判断。</item>
+    /// </list>
+    ///
+    /// <para>
+    /// 【为什么还要退化判据】障碍物没有 <c>AreaBuildingDataBase</c>（实测 `DataBase()` 返回 null），
+    /// 因为它的 <c>buildingID = -1</c>，在建筑表里查不到。
+    /// 普通建筑则一定有。这个判据不依赖任何字符串。
+    /// </para>
+    /// </summary>
+    private static bool IsObstacle(AreaBuildingData? data)
+    {
+        if (data == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            Il2CppSystem.Collections.Generic.List<string>? names =
+                AreaBuildController.AreaObstacleName;
+
+            if (names != null && names.Count > 0)
+            {
+                // 拿不到名字（障碍物 Name() 会抛异常）→ 只能用 DataBase 判据。
+                string? name = null;
+
+                try
+                {
+                    name = data.Name(false);
+                }
+                catch
+                {
+                    // 障碍物的 Name() 抛 NullReferenceException（它没有 DataBase）——
+                    // 这本身就是“它是障碍物”的强信号，但**不**据此下结论，
+                    // 而是继续走下面的 DataBase 判据（避免用异常当控制流）。
+                }
+
+                if (!string.IsNullOrEmpty(name))
+                {
+                    for (int i = 0; i < names.Count; i++)
+                    {
+                        if (names[i] == name)
+                        {
+                            return true;
+                        }
+                    }
+
+                    // 名字能取到、且不在名单里 → 确定是普通建筑。
+                    return false;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Plugin.LogInfo(() => $"[Shift+单击升级] 障碍物名单读取失败，退化判据：{e.GetType().Name}");
+        }
+
+        // ── 退化判据：障碍物没有 DataBase（buildingID = -1，查不到表）──────
+        try
+        {
+            return data.DataBase() == null;
+        }
+        catch
+        {
+            // 连 DataBase() 都调不动 —— 按障碍物处理更安全吗？
+            // 不。按**普通建筑**处理：它的按钮是「升级」，
+            // 若真取不到按钮，`TriggerMenuAction` 会静默跳过，不会误操作。
+            return false;
         }
     }
 
     /// <summary>最近一次升级触发的时间戳（毫秒）。</summary>
     private static int _lastUpgradeTick;
+
+    /// <summary>
+    /// 本次点击是否归本 mod 处理（由建筑 Prefix 置位）。
+    ///
+    /// <para>
+    /// 【为什么不用 `__state` 表达这个】建筑的 `__state` 现在携带的是
+    /// **「是否为障碍物」**（Postfix 靠它选「拆除」还是「升级」），
+    /// 与「要不要处理」是两个正交的维度，不能挤进一个 bool。
+    /// 非 Shift 的点击也会进 Postfix，若拿 `__state == false` 当“不处理”，
+    /// 就会与“普通建筑”混淆，导致**没按 Shift 也去点升级**。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ 这个标志**只对建筑图标那条链**有意义（道路链的 `__state` 就是
+    /// “要不要处理”，不需要它）。它必须在 Postfix 读完立刻清掉，
+    /// 否则会把下一次无关点击也当成自己的。
+    /// </para>
+    /// </summary>
+    private static bool _handledThisClick;
 
     /// <summary>是否已经**发生过**至少一次触发。</summary>
     /// <remarks>
@@ -921,7 +1162,7 @@ internal static class ShiftClickUpgradePatch
     }
 
     /// <summary>
-    /// 找当前激活的「升级」按钮。
+    /// 找当前生效的建造菜单按钮（按文字匹配）。
     ///
     /// <para>两个候选（实测都存在）：</para>
     /// <list type="bullet">
@@ -930,11 +1171,23 @@ internal static class ShiftClickUpgradePatch
     /// </list>
     /// <para>
     /// ⚠️ 不能靠名字写死：菜单是运行时 Instantiate 的，层级会变。
-    /// 所以按**文字内容**扫（两个按钮的文字都是「升级」），更耐改。
+    /// 所以按**文字内容**扫（多个按钮的文字都是「升级」），更耐改。
+    /// </para>
+    ///
+    /// <para>
+    /// ⚠️ **同一个文字可能匹配到多个按钮** —— 游戏复用按钮对象，
+    /// 会残留上一代的同名按钮（实测：同一菜单里并存两个「取消拆除」，
+    /// 旧的 <c>enabled=false</c>、新的 <c>enabled=true</c>）。
+    /// 所以这里**优先返回 `enabled=true` 的那个**；
+    /// 若一个都没有（说明全是残留），才退回返回第一个匹配项 ——
+    /// 让调用方统一走“残留按钮”的处理分支（静默跳过），而不是在这里返回 null
+    /// 而误报成“菜单里没这个按钮”（两种情况的日志含义不同）。
     /// </para>
     /// </summary>
-    private static UnityEngine.UI.Button? FindActiveUpgradeButton()
+    private static UnityEngine.UI.Button? FindActiveChoiceButton(string text)
     {
+        UnityEngine.UI.Button? fallback = null;
+
         try
         {
             UnityEngine.UI.Button[] buttons =
@@ -954,23 +1207,29 @@ internal static class ShiftClickUpgradePatch
                     continue;
                 }
 
-                // 按文字匹配（两个升级按钮的文字都是“升级”）。
+                // 按**文字**匹配 —— 菜单是运行时 Instantiate 的，层级会变，写名字不可靠。
                 UnityEngine.UI.Text? label = go.GetComponentInChildren<UnityEngine.UI.Text>(true);
 
-                if (label == null || label.text != "升级")
+                if (label == null || label.text != text)
                 {
                     continue;
                 }
 
-                return b;
+                // 生效的那个优先。
+                if (b.enabled)
+                {
+                    return b;
+                }
+
+                fallback ??= b;
             }
         }
         catch (Exception e)
         {
-            Plugin.LogInfo(() => $"[Shift+单击升级] 扫描按钮失败：{e.GetType().Name}");
+            Plugin.LogInfo(() => $"[Shift+单击升级] 扫描「{text}」按钮失败：{e.GetType().Name}");
         }
 
-        return null;
+        return fallback;
     }
 
 
@@ -1176,7 +1435,13 @@ internal static class ShiftClickUpgradePatch
             // 挂到空桩上和挂到真实现上，日志一模一样。
             long il = target.MethodHandle.GetFunctionPointer().ToInt64();
 
-            Plugin.Log.Msg(
+            // 受 `diagnostics` 门控（用户要求收敛日志量）。
+            //
+            // ⚠️ 这一行曾经**不受门控**：它是「补丁真的挂到原生实现上了吗」
+            //    的唯一凭据（本项目吃过「只看到挂载成功、其实没触发」的亏）。
+            //    稳定后改为门控 —— 需要时把 `diagnostics` 打开，
+            //    启动时会打全量（方法名 / IL 地址 / patcher 类型）。
+            Plugin.LogInfo(() =>
                 $"已挂载补丁：{targetType.Name}.{target.Name} (IL=0x{il:x}) -> {patchMethodName}" +
                 $" | patcher={Plugin.DescribePatcher(target)}");
 
@@ -1234,7 +1499,8 @@ internal static class ShiftClickUpgradePatch
 
             long il = target.MethodHandle.GetFunctionPointer().ToInt64();
 
-            Plugin.Log.Msg(
+            // 同 TryPatchPrefix —— 受 `diagnostics` 门控。
+            Plugin.LogInfo(() =>
                 $"已挂载补丁（Postfix）：{targetType.Name}.{target.Name} (IL=0x{il:x}) -> {patchMethodName}" +
                 $" | patcher={Plugin.DescribePatcher(target)}");
 
