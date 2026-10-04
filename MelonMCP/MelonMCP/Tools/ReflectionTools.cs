@@ -13,6 +13,11 @@ namespace MelonMCP.Tools
     public class ListAssembliesToolDefinition : ToolDefinitionBase
     {
         public override string Name => "list_assemblies";
+
+        // Managed reflection only. Listing loaded assemblies never dereferences a Unity object,
+        // so it stays usable while the main thread is wedged.
+        public override bool RequiresMainThread => false;
+
         public override string Description => @"List all assemblies loaded in the game process.
 This includes Unity assemblies, game assemblies, and mod assemblies.
 Use the filter parameter to search for specific assemblies.";
@@ -111,6 +116,10 @@ Use the filter parameter to search for specific assemblies.";
     public class ListTypesToolDefinition : ToolDefinitionBase
     {
         public override string Name => "list_types";
+
+        // Managed metadata only - must not be gated on the game's main thread.
+        public override bool RequiresMainThread => false;
+
         public override string Description => @"List types (classes, structs, enums, interfaces) in an assembly.
 Use filters to narrow down the results.";
 
@@ -279,6 +288,10 @@ Use filters to narrow down the results.";
     public class GetTypeInfoToolDefinition : ToolDefinitionBase
     {
         public override string Name => "get_type_info";
+
+        // Reads managed type metadata only; no Unity object is touched.
+        public override bool RequiresMainThread => false;
+
         public override string Description => @"Get detailed information about a specific type including:
 - Properties, fields, methods, constructors
 - Base type and interfaces

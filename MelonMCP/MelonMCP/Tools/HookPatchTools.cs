@@ -20,6 +20,12 @@ namespace MelonMCP.Tools
     {
         public override string Name => "hook_patch_info";
 
+        // Harmony/Il2CppInterop metadata plus a raw entry-byte read - no Unity object is touched.
+        // Critical to keep off the main thread: when a patch is suspected of causing a hang, this is
+        // the tool that tells you whether the detour is even installed.
+        public override bool RequiresMainThread => false;
+
+
         public override string Description => @"Report the runtime patch state of a method: which patcher Harmony
 actually selected and whether it is valid, the exact bound target signature and IL address, every
 prefix/postfix/transpiler with its owner and priority, and the method's REAL runtime entry bytes.
@@ -296,6 +302,11 @@ Pass either typeName + methodName, or owner to list everything a given mod has p
     public class ListPatchesToolDefinition : ToolDefinitionBase
     {
         public override string Name => "list_patches";
+
+        // Walks Harmony's patch registry; does not dereference Unity objects. Keeping this off the
+        // main thread means a patch inventory is still obtainable during a freeze.
+        public override bool RequiresMainThread => false;
+
 
         public override string Description => @"List all Harmony patches in the process, including those applied
 by OTHER mods. Each row gives the target's full signature, the owner Harmony ID, and how many

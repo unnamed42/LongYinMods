@@ -16,7 +16,12 @@ namespace MelonMCP.Tools
         string Name { get; }
 
         /// <summary>
-        /// Whether this tool requires Unity main thread access
+        /// Whether this tool requires Unity main thread access.
+        ///
+        /// Set this to false whenever the tool touches no Unity object. Main-thread tools are queued
+        /// onto the Unity main thread and therefore become unreachable whenever that thread is busy or
+        /// wedged - precisely the situation in which native/reflection diagnostics are needed most.
+        /// Only tools that actually dereference Unity objects belong on the main thread.
         /// </summary>
         bool RequiresMainThread { get; }
 
@@ -41,6 +46,10 @@ namespace MelonMCP.Tools
 
         /// <summary>
         /// Most tools need Unity main thread. Override to false for tools that don't.
+        ///
+        /// Default true is the safe choice for anything that dereferences a Unity object, but it is
+        /// also a liability: a main-thread tool cannot answer while the main thread is busy, so
+        /// diagnostics that only read native memory or managed reflection should override it.
         /// </summary>
         public virtual bool RequiresMainThread => true;
 

@@ -19,6 +19,16 @@ namespace MelonMCP.Server
     /// </summary>
     public class MCPServer
     {
+        /// <summary>
+        /// How long a main-thread tool may wait for the Unity main thread before giving up.
+        ///
+        /// Short on purpose. When the main thread is healthy, tools run in milliseconds, so this is
+        /// never reached in normal use. When it is wedged, waiting longer buys nothing and costs the
+        /// caller the ability to react - a 400ms liveness probe plus a clear verdict is worth far more
+        /// than 30 seconds of silence followed by a misleading 'the game may be paused'.
+        /// </summary>
+        private const int MainThreadToolTimeoutSeconds = 3;
+
         private readonly int _port;
         private TcpListener _listener;
         private CancellationTokenSource _cancellation;
@@ -286,15 +296,41 @@ namespace MelonMCP.Server
                         }
                     });
 
-                    // Wait for completion with timeout
-                    if (!resetEvent.Wait(TimeSpan.FromSeconds(30)))
+                    // Wait for completion with timeout. The timeout is deliberately short: a
+                    // main-thread tool that has not run within a couple of seconds is not going to
+                    // run soon, and the caller can decide what to do far better if it gets an answer
+                    // quickly than if it blocks for half a minute.
+                    if (!resetEvent.Wait(TimeSpan.FromSeconds(MainThreadToolTimeoutSeconds)))
                     {
+                        // Do not guess. Ask the watchdog whether frames are still completing, which
+                        // cleanly separates 'busy/paused' (retry) from 'wedged' (go to the OS).
+                        MainThreadStatus status;
+                        try { status = MainThreadWatchdog.Probe(400); }
+                        catch (Exception probeEx) { status = null; MelonMCPPlugin.Logger?.Warning($"Watchdog probe failed: {probeEx.Message}"); }
+
+                        var sb = new System.Text.StringBuilder();
+                        sb.Append($"Tool '{callParams.Name}' needs the Unity main thread and did not run within {MainThreadToolTimeoutSeconds}s.");
+                        if (status != null)
+                        {
+                            sb.Append($" Main-thread verdict: {status.Verdict}");
+                            sb.Append($" ({status.FramesDuringWindow} frame(s) in {status.ProbedForMs}ms).");
+                            if (status.StallSeconds > 0)
+                            {
+                                sb.Append($" Last frame was {status.StallSeconds:F1}s ago.");
+                            }
+                            sb.Append(' ').Append(status.Explanation);
+                            if (!string.IsNullOrEmpty(status.NativeHint))
+                            {
+                                sb.Append(' ').Append(status.NativeHint);
+                            }
+                        }
+
                         return new JsonRpcResponse
                         {
                             Id = request.Id,
                             Result = new CallToolResult
                             {
-                                Content = new List<ToolContent> { ToolContent.TextContent("Tool execution timed out after 30 seconds. The game may be paused or in a loading screen.") },
+                                Content = new List<ToolContent> { ToolContent.TextContent(sb.ToString()) },
                                 IsError = true
                             }
                         };

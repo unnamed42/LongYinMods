@@ -62,6 +62,11 @@ namespace MelonMCP
             // Subscribe to log events
             SubscribeToAllLogEvents();
 
+            // Learn the difference between "this assembly is being swapped out" and "the process is
+            // ending". Set well before OnDeinitializeMelon (see _definiteQuit for the verified
+            // ordering), so the teardown can choose to keep serving instead of shutting down.
+            SubscribeToDefiniteQuit();
+
             LoggerInstance.Msg("MelonMCP Initializing...");
 
             try
@@ -98,13 +103,33 @@ namespace MelonMCP
         }
 
         /// <summary>
+        /// Set when MelonLoader announces that the process is genuinely going away, as opposed to a
+        /// hot-reload swapping this assembly out.
+        ///
+        /// This distinction is the whole point of the shutdown-survival behaviour. UnregisterInstance
+        /// drives OnDeinitializeMelon in BOTH cases, and the mod historically treated them
+        /// identically: it closed the listening socket, dropped the log buffer and stopped the
+        /// watchdog. That is right for a reload (the port must be free before the new load binds it)
+        /// and exactly wrong for an exit, because the reason to keep a debugger attached is the exit
+        /// path itself - an IL2CPP teardown that never finishes because some mod left a thread
+        /// attached to the domain.
+        ///
+        /// Verified ordering in MelonLoader 0.7.3 (decompiled):
+        ///   SupportModule_From.DefiniteQuit() -> MelonEvents.OnApplicationDefiniteQuit.Invoke(),
+        ///   and MelonAssembly subscribes OnApplicationQuit to that event, which calls
+        ///   UnregisterMelons -> UnregisterInstance -> OnDeinitializeMelon.
+        /// So this flag is always set BEFORE OnDeinitializeMelon runs; it never races.
+        /// </summary>
+        private static volatile bool _definiteQuit;
+
+        /// <summary>
         /// MelonLoader teardown callback, invoked when the melon is unregistered - by shutdown, or by
         /// a hot-reload plugin swapping the assembly out.
         ///
-        /// This is the piece that was missing: previously only OnApplicationQuit() stopped the
-        /// server, and that never fires on a hot reload, so port 27015 stayed bound and the next
-        /// load failed. Everything this mod holds that outlives the assembly must be released here,
-        /// or the reload leaks the port and pins the old assembly in memory.
+        /// Everything this mod holds that outlives the assembly must be released here, or the reload
+        /// leaks the port and pins the old assembly in memory. The exception is the real-exit path:
+        /// see _definiteQuit. On a genuine quit the server and its buffers are deliberately kept
+        /// alive, because the hang we are here to debug happens after this callback returns.
         ///
         /// Note: Harmony patches on the plugin's own HarmonyInstance are removed by MelonLoader
         /// itself (MelonBase.UnregisterInstance calls HarmonyInstance.UnpatchSelf() right after this
@@ -113,6 +138,23 @@ namespace MelonMCP
         public override void OnDeinitializeMelon()
         {
             _deinitialized = true;
+
+            // On a genuine quit, deliberately leave the server listening. MelonLoader is about to
+            // call Core.Quit(), and the process may then hang inside IL2CPP teardown - at which
+            // point this server is the only remaining way to see why. Closing it here, as this
+            // code used to do unconditionally, threw away the log buffer and the watchdog at
+            // exactly the moment they became interesting.
+            //
+            // The cost is that the port stays bound until the process actually dies. That is
+            // acceptable: nothing is going to load another copy of this mod into a dying process.
+            if (_definiteQuit)
+            {
+                LoggerInstance?.Msg("MelonMCP is staying up during shutdown so a hung exit can still be "
+                    + "diagnosed. Main-thread tools will stop responding once Unity tears down; "
+                    + "read_logs, main_thread_status, disasm, read_mem, list_patches and the config "
+                    + "tools keep working.");
+                return;
+            }
 
             // Release the listening socket first: this is what unblocks a hot reload.
             try
@@ -159,6 +201,10 @@ namespace MelonMCP
             _hasEnabledRunInBackground = false;
             _runInBackgroundCheckCounter = 0;
 
+            // Stop the heartbeat so a probe made after this load is torn down cannot mistake a stale
+            // counter for a live main thread.
+            MainThreadWatchdog.Reset();
+
             // Only clear the singleton if it still points at this instance; a newer load may have
             // already installed its own plugin object.
             if (ReferenceEquals(Instance, this))
@@ -181,6 +227,9 @@ namespace MelonMCP
             // Log tools
             _server.RegisterTool(new ReadLogsToolDefinition());
             _server.RegisterTool(new ClearLogsToolDefinition());
+            // Main-thread liveness. Deliberately grouped with the log tools: these are the operations
+            // that must keep working when the game itself has stopped responding.
+            _server.RegisterTool(new MainThreadStatusToolDefinition());
 
             // Code execution tools
             _server.RegisterTool(new ExecuteCSharpToolDefinition());
@@ -287,7 +336,24 @@ namespace MelonMCP
             // Once the melon is unloaded (hot reload, or shutdown) there is nothing left to pump.
             // OnUpdate is driven by MelonLoader's own update loop, which may still tick this object
             // briefly after Unregister; touching Unity here would resurrect state we just released.
+            //
+            // The heartbeat is the exception: it touches nothing but plain statics, and on a real
+            // exit it is precisely what tells a reader that the main thread has stopped completing
+            // frames. Skipping it during shutdown would make main_thread_status report a permanently
+            // stale counter exactly when the answer matters.
+            if (_deinitialized && !_definiteQuit) return;
+
+            // Prove to any other thread that the main thread is still alive. This is the only
+            // main-thread-side cost the watchdog adds, and it is three volatile writes.
+            MainThreadWatchdog.Beat();
+
+            // Everything below reaches into Unity or the dispatcher, so it must stay behind the
+            // unload check: on a real exit the game is already tearing down.
             if (_deinitialized) return;
+
+            // Prove to any other thread that the main thread is still alive. This is the only
+            // main-thread-side cost the watchdog adds, and it is three volatile writes.
+            MainThreadWatchdog.Beat();
 
             // Process queued actions on the main thread
             UnityMainThreadDispatcher.ProcessQueue();
@@ -421,12 +487,161 @@ namespace MelonMCP
         /// Normal shutdown. MelonLoader runs OnDeinitializeMelon first, so by the time this fires the
         /// server is usually already stopped; MCPServer.Stop() is idempotent, and the null-guard
         /// below keeps this harmless either way.
+        ///
+        /// On a definite quit the server was deliberately left running (see _definiteQuit), and this
+        /// callback fires before the engine finishes tearing down - so stopping here would undo that
+        /// and close the port right before the hang we want to observe.
         /// </summary>
         public override void OnApplicationQuit()
         {
+            if (_definiteQuit)
+            {
+                LoggerInstance?.Msg("MelonMCP: keeping the server up through application quit.");
+                return;
+            }
+
             _server?.Stop();
             LoggerInstance?.Msg("MelonMCP Server stopped");
         }
+
+        #region Shutdown detection
+
+        /// <summary>
+        /// Subscribe to MelonLoader's quit events so the teardown can tell a real exit from a hot
+        /// reload, and keep the server alive for the former.
+        ///
+        /// ORDERING IS LOAD-BEARING HERE, and getting it wrong fails silently.
+        ///
+        /// MelonAssembly subscribes its own OnApplicationQuit to OnApplicationDefiniteQuit at load
+        /// time, and that callback runs UnregisterMelons -> UnregisterInstance -> OnDeinitializeMelon
+        /// - i.e. it is the thing that tears this mod down. Our handler must therefore run BEFORE
+        /// it, or the flag it sets arrives too late to be read.
+        ///
+        /// MelonEventBase orders callbacks by PRIORITY (verified against the shipped
+        /// MelonLoader.dll, not inferred): Subscribe inserts an action before the first entry with a
+        /// strictly greater priority, and otherwise appends. MelonAssembly subscribes with the
+        /// default priority 0, so subscribing with priority 0 puts us AFTER it - which is exactly
+        /// what happened, and why the keep-alive never engaged. A negative priority is inserted
+        /// ahead of it.
+        ///
+        /// Both quit events are covered because they fire at different moments and either alone is
+        /// enough to know the process is going away:
+        ///   OnApplicationQuit         - the quit REQUEST (earliest; cancellable, so merely a hint)
+        ///   OnApplicationDefiniteQuit - the COMMITMENT (fires just before Core.Quit())
+        ///
+        /// Failures are non-fatal on purpose: if neither event can be reached, the mod keeps the old
+        /// (reload-safe) behaviour of releasing the port, which is the conservative choice.
+        /// </summary>
+        private void SubscribeToDefiniteQuit()
+        {
+            try
+            {
+                // priority:-1 places this ahead of MelonAssembly's default-priority callback.
+                MelonEvents.OnApplicationQuit.Subscribe(OnDefiniteQuit, -1);
+                MelonEvents.OnApplicationDefiniteQuit.Subscribe(OnDefiniteQuit, -1);
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance?.Warning($"Could not subscribe to the quit events ({ex.Message}); "
+                    + "the MCP server will shut down as usual on exit and will not be available to "
+                    + "diagnose a hung shutdown.");
+                return;
+            }
+
+            VerifyQuitSubscriptionOrder();
+        }
+
+        /// <summary>
+        /// Confirm at startup that our quit handler really is ahead of MelonAssembly's.
+        ///
+        /// This exists because the failure mode it guards against is invisible: with equal
+        /// priorities the mod still starts, still logs, and still shuts down - it just never gets
+        /// the keep-alive, and the only symptom is a missing log line during an exit that is
+        /// already going wrong. Reading the subscriber list back turns a silent ordering
+        /// regression into a loud warning while the game is still healthy.
+        private void VerifyQuitSubscriptionOrder()
+        {
+            try
+            {
+                // GetSubscribers returns the list in invocation order, which is exactly the order
+                // Invoke() will walk. MelonAssembly's entries are created from within that assembly,
+                // so identifying them by declaring assembly is enough and does not depend on the
+                // shape of MelonAssembly's internals.
+                var subscribers = MelonEvents.OnApplicationDefiniteQuit.GetSubscribers();
+                if (subscribers == null || subscribers.Length == 0)
+                {
+                    LoggerInstance?.Warning("Quit-subscription self-check: subscriber list was empty; "
+                        + "cannot confirm the keep-alive-on-exit path will run.");
+                    return;
+                }
+
+                int ourIndex = -1;
+                int assemblyIndex = -1;
+
+                for (int i = 0; i < subscribers.Length; i++)
+                {
+                    var del = subscribers[i]?.del;
+                    if (del == null) continue;
+
+                    if (del.Method.DeclaringType == typeof(MelonMCPPlugin))
+                    {
+                        if (ourIndex < 0) ourIndex = i;
+                    }
+                    else if (del.Method.DeclaringType?.Assembly.GetName().Name == "MelonLoader")
+                    {
+                        if (assemblyIndex < 0) assemblyIndex = i;
+                    }
+                }
+
+                if (ourIndex < 0)
+                {
+                    LoggerInstance?.Warning("Quit-subscription self-check: our quit handler is not in "
+                        + "the subscriber list; the MCP server will not survive a hung shutdown.");
+                    return;
+                }
+
+                if (assemblyIndex >= 0 && ourIndex > assemblyIndex)
+                {
+                    LoggerInstance?.Error("Quit-subscription self-check FAILED: our quit handler runs "
+                        + $"after MelonLoader's teardown (index {ourIndex} vs {assemblyIndex}). The "
+                        + "keep-alive-on-exit path will NOT trigger, so MCP will be gone by the time a "
+                        + "hung shutdown happens. Expected priority to place us first.");
+                    return;
+                }
+
+                // Success is logged deliberately: the whole reason this check exists is that the
+                // failure it guards against used to be invisible, so a positive confirmation is
+                // worth one line at startup.
+                LoggerInstance?.Msg("Quit-subscription self-check passed: MCP will keep serving "
+                    + "during a real quit so a hung shutdown can still be diagnosed.");
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance?.Warning($"Quit-subscription self-check failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Runs before teardown. Must not touch Unity: at this point the engine is already tearing
+        /// down, and the only job here is to record intent in a plain static field.
+        /// </summary>
+        private void OnDefiniteQuit()
+        {
+            _definiteQuit = true;
+            try
+            {
+                // Goes through the normal log path so it is also visible in the MCP log buffer that
+                // we are about to preserve - this is the line that explains why the port is still up.
+                LoggerInstance?.Msg("MelonMCP: definite quit detected; server will remain available "
+                    + "until the process exits.");
+            }
+            catch
+            {
+                // Logging during shutdown must never be able to break the shutdown path.
+            }
+        }
+
+        #endregion
 
         #region Log Capture
 

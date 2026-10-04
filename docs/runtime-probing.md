@@ -128,6 +128,97 @@
 - `UnregisterInstance` 顺序：`OnDeinitializeMelon()` → `UnregisterInternal()` → … → **`HarmonyInstance.UnpatchSelf()`**。
   → **插件不需要自己撤销 Harmony 补丁**，MelonLoader 会做。teardown 只需释放非 Harmony 资源。
 - `MelonLogger` 的静态事件（`MsgCallbackHandler` / `WarningCallbackHandler` / `ErrorCallbackHandler`）若不退订会**钉住程序集、阻止 ALC 回收**。
+- ✓ **`OnDeinitializeMelon` 在「热重载」和「真退出」两种情况下都会被调用**，且**无法从它自身区分**。
+  这曾导致 MelonMCP 在退出时**过早关掉监听端口** —— 后果见下。
+
+#### 「真退出」与「热重载」的区分（反编译 MelonLoader 0.7.3 核实）
+
+调用链（反编译核实）：
+
+```
+SupportModule_From.DefiniteQuit()          // 引擎确定要退出了，不可取消
+  → MelonEvents.OnApplicationDefiniteQuit.Invoke()
+  → 按 priority 顺序依次回调所有订阅者：
+      ① MelonAssembly.OnApplicationQuit()   ← 卸载：UnregisterMelons → OnDeinitializeMelon
+      ② （其它 mod 的回调）
+  → 回到 DefiniteQuit：Core.Quit()          // ← 卸载之后才真正退
+```
+
+⚠️ **注意两个不同的事件**（名字像，语义不同）：
+
+| 事件 | 语义 | 可否取消 |
+|---|---|---|
+| `MelonEvents.OnApplicationQuit` | **请求**退出 | ✅ 可取消 |
+| `MelonEvents.OnApplicationDefiniteQuit` | **确定**退出 | ❌ 不可取消 |
+
+##### ⚠️ 真正的坑：订阅顺序由 **priority 决定**，不是「谁先订阅谁先跑」
+
+`MelonEventBase<T>.Subscribe(action, priority=0, ...)` 的插入规则（反编译原样）：
+
+```csharp
+for (int num = 0; num < actions.Count; num++)
+    if (a.priority < melonAction.priority)   // ← 严格小于才插到前面
+    { actions.Insert(num, a); return; }
+actions.Add(a);                              // ← 同 priority：追加到末尾 → 后执行
+```
+
+`Invoke()` 按这个数组顺序依次调用。而 **`MelonAssembly` 订阅时用的是默认 priority = 0**。
+
+> ❌ **本项目真实事故**：MelonMCP 想用 `OnApplicationDefiniteQuit` 置一个「真退出」标志，
+> 以在 teardown 里决定「保活 MCP」还是「释放端口」。代码写的是
+> `Subscribe(OnDefiniteQuit)`（默认 priority 0），而它**在 `OnInitializeMelon` 里才订阅**，
+> 晚于 MelonAssembly ⇒ **排在 MelonAssembly 之后** ⇒ 标志位在
+> `OnDeinitializeMelon`（即服务器已被关掉）**之后**才置上 ⇒ **保活逻辑从未执行**。
+>
+> 危害在于**完全静默**：mod 正常启动、正常记日志、正常退出，只是那条保活分支永远走不到。
+> 日志里能看到的唯一线索是：期望的两条日志**一条都没有**，而 `Server stopped` 出现了。
+
+✅ **正确做法：给一个负 priority，插到 MelonAssembly 之前**
+
+```csharp
+MelonEvents.OnApplicationQuit.Subscribe(OnDefiniteQuit, -1);          // 请求退出（最早）
+MelonEvents.OnApplicationDefiniteQuit.Subscribe(OnDefiniteQuit, -1);  // 确定退出
+```
+
+`-1 < 0` ⇒ 走 `Insert(0, ...)` ⇒ 先于 MelonAssembly 执行。
+
+**为什么同时订阅两个事件**：`OnApplicationQuit`（请求，可取消）最早触发，
+`OnApplicationDefiniteQuit`（确定）随后。**任一个到来都足以断定进程要走了** ——
+即使请求退出后来被取消，代价也只是端口多监听一会儿（进程很快就没了），
+而**漏判的代价是丢光诊断能力**。这个不对称性决定了应该偏保守。
+
+> 💡 **教训（写这类钩子时的通用纪律）**：只要回调顺序会影响正确性，
+> 就**不能依赖订阅先后**，必须显式指定 priority；并且**启动时把顺序读回来自检**
+> （`MelonEventBase.GetSubscribers()` 返回的就是真实调用序）。
+> **静默失效比报错危险得多** —— 它会让你在正确的代码里找不存在的 bug。
+> MelonMCP 的 `VerifyQuitSubscriptionOrder()` 即此自检：
+> 启动时确认自己的回调确实排在 MelonAssembly 之前，否则**大声报错**。
+
+> 💡 **为什么值得在意**：退出路径本身可能是坏的。若 exit hang 的原因在 `Core.Quit()` 之后
+> （IL2CPP teardown），那么在 `OnDeinitializeMelon` 里就把调试工具全关掉，等于
+> **在事故现场卸掉监控**。MelonMCP 现在遇到 definite quit 会**保持端口监听**，
+> 让 `read_logs` / `main_thread_status` / `disasm` 在退出期仍可用。
+
+> ⚠️ **`OnUpdate` 里的 `_deinitialized` 早退会连看门狗一起停掉**。心跳必须放在早退之前，
+> 否则 `main_thread_status` 在退出期会报一个**永远不动的计数器** —— 把「主线程卡死」和
+> 「心跳被自己关了」搞成同一个读数。
+
+#### IL2CPP 退出卡死：官方定性
+
+这是 **Unity 已知问题**，非本项目特有：[Player build freezes after calling Application.Quit() when the scripting backend is set to IL2CPP](https://issuetracker.unity.com/issues/8178/player-build-freezes-after-calling-applicationquit-when-the-scripting-backend-is-set-to-il2cpp)
+（特征：**Mono 后端正常、IL2CPP 卡死**，2019→2022 多版本复现）。
+
+机制（Unity 工程师 [JoshPeterson 的解释](https://discussions.unity.com/t/background-threads-cause-app-to-hang-on-ios-with-il2cpp/890948)）：
+
+> At shutdown, the IL2CPP runtime will attempt to cause all threads (background or not) to exit.
+> Threads that are executing managed code should exit properly. **But if a given thread is executing
+> native code, that might be a problem**, as the native code could be involved in some kind of a
+> blocking call into the OS, and the IL2CPP runtime won't be able to stop that thread.
+
+**判定特征**：进程 `S` 态、**CPU 归零**、日志已走到全部 mod 卸载完，但进程不退。
+→ 用 `eu-stack -p <pid>` / `gdb -p <pid>` 看谁还 attach 着。
+**本项目实例**：`WuMingPerformance` 的 `WuMingPerf-WorldWorker` 线程
+`il2cpp_thread_attach` 过、永久阻塞在 `WaitOne()`、**从不 `Dispose`（即从不 detach）**。
 
 ### 7.4 崩溃排查
 

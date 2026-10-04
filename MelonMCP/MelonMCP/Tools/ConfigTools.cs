@@ -210,6 +210,10 @@ namespace MelonMCP.Tools
     {
         public override string Name => "list_configs";
 
+        // Reads the MelonPreferences object graph only - no Unity object involved.
+        public override bool RequiresMainThread => false;
+
+
         public override string Description => @"List every MelonLoader preference category and entry, with current
 value, default value, declared type and description.
 
@@ -341,6 +345,10 @@ OnInitializeMelon (typically anything that installs a native hook) were baked in
     {
         public override string Name => "get_config";
 
+        // MelonPreferences lookup; independent of the Unity main thread.
+        public override bool RequiresMainThread => false;
+
+
         public override string Description => @"Read one MelonLoader preference entry, or every entry in a
 category when 'key' is omitted.
 
@@ -447,6 +455,11 @@ from the declared default - useful before deciding whether a reset is warranted.
     public class SetConfigToolDefinition : ToolDefinitionBase
     {
         public override string Name => "set_config";
+
+        // Writes a MelonPreferences entry. Off the main thread on purpose: a mod's own setting is
+        // often the thing you want to flip (e.g. to bisect) while the main thread is stuck.
+        public override bool RequiresMainThread => false;
+
 
         public override string Description => @"Set one MelonLoader preference entry and save it to disk.
 
@@ -618,6 +631,10 @@ Returns the previous value so the change can be undone or verified.";
     public class ResetConfigToolDefinition : ToolDefinitionBase
     {
         public override string Name => "reset_config";
+
+        // MelonPreferences write; no Unity object access.
+        public override bool RequiresMainThread => false;
+
 
         public override string Description => @"Restore MelonLoader preference entries to their declared
 defaults.

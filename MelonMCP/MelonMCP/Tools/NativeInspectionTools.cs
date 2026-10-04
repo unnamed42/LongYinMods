@@ -19,6 +19,14 @@ namespace MelonMCP.Tools
     {
         public override string Name => "disasm";
 
+        /// <summary>
+        /// Pure native memory work: Iced decodes bytes it reads out of the target process. There is no
+        /// Unity object anywhere on this path, so it must NOT be queued behind the main thread - the
+        /// whole point is to still work when the main thread is wedged in a native infinite loop, which
+        /// is exactly when this tool is most needed.
+        /// </summary>
+        public override bool RequiresMainThread => false;
+
         public override string Description => @"Disassemble the RUNNING process's memory (x86-64, Iced).
 
 Accepts either a runtime address or a static VA (0x180xxxxxx, as printed by Ghidra/objdump); a static VA
@@ -114,6 +122,12 @@ tool reports the region it actually read from.";
     public class ReadMemToolDefinition : ToolDefinitionBase
     {
         public override string Name => "read_mem";
+
+        /// <summary>
+        /// Reads raw bytes through the OS, not through Unity. Must stay off the main thread so it
+        /// remains usable while the main thread is stuck (see DisasmToolDefinition).
+        /// </summary>
+        public override bool RequiresMainThread => false;
 
         public override string Description => @"Read raw memory from the running process and show it as hex plus
 printable ASCII, 16 bytes per row.
@@ -217,6 +231,12 @@ descriptor slots, and vtables - data rather than code. Use disasm for instructio
     public class ResolveJumpToolDefinition : ToolDefinitionBase
     {
         public override string Name => "resolve_jump";
+
+        /// <summary>
+        /// Follows an encoded jump by reading target memory only. No Unity involvement; keep it off the
+        /// main thread so it survives a wedged main thread.
+        /// </summary>
+        public override bool RequiresMainThread => false;
 
         public override string Description => @"Follow a jump at the given address and report its real target.
 

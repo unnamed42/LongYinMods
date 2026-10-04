@@ -79,17 +79,33 @@
     Input is $(IntermediateOutputPath)MelonMCP.dll (the pristine compiler output), NOT $(TargetPath):
     writing the merged file back over the build output would make the next incremental build re-merge
     an already-merged assembly, and ILRepack then reports every mcs type as a duplicate.
+
+    There is deliberately NO configuration condition here. It used to be Release-only, which made
+    'dotnet build -c Debug' succeed while silently producing an assembly with no Mono.CSharp in it:
+    execute_csharp and evaluate_expression then died at type-initializer time with a message that
+    points nowhere near the real cause. A build that emits a broken artifact on success is worse
+    than one that fails loudly, so every configuration now merges.
+
+    DebugInfo is tied to the configuration rather than hardcoded off, so a Debug build still yields
+    a usable .pdb while a Release build stays lean.
   -->
-  <Target Name="MergeMcsIntoMod" AfterTargets="Build" Condition="'$(Configuration)'=='Release'">
+  <Target Name="MergeMcsIntoMod" AfterTargets="Build">
     <PropertyGroup>
       <MergedModPath>$(TargetDir)MelonMCP.dll</MergedModPath>
       <PristineModPath>$(IntermediateOutputPath)MelonMCP.dll</PristineModPath>
+      <!--
+        Emit a merged .pdb for Debug builds so a live stack trace is still readable, and skip it for
+        Release where the symbols are dead weight. Previously this was hardcoded false, which threw
+        away the debug build's most useful property for no reason.
+      -->
+      <MergeDebugInfo Condition="'$(Configuration)'=='Debug'">true</MergeDebugInfo>
+      <MergeDebugInfo Condition="'$(MergeDebugInfo)'==''">false</MergeDebugInfo>
     </PropertyGroup>
     <ItemGroup>
       <MergeInputs Include="$(PristineModPath)" />
       <MergeInputs Include="$(McsDllPath)" />
     </ItemGroup>
-    <ILRepack TargetKind="SameAsPrimaryAssembly" OutputFile="$(MergedModPath)" InputAssemblies="@(MergeInputs)" LibraryPath="$(TargetDir);$(LibDir)\net6;$(MelonDir);$(UnityPath)" Internalize="false" Parallel="true" DebugInfo="false" Union="true" AllowDuplicateResources="true" AllowedDuplicateNamespaces="Mono.CompilerServices" />
+    <ILRepack TargetKind="SameAsPrimaryAssembly" OutputFile="$(MergedModPath)" InputAssemblies="@(MergeInputs)" LibraryPath="$(TargetDir);$(LibDir)\net6;$(MelonDir);$(UnityPath)" Internalize="false" Parallel="true" DebugInfo="$(MergeDebugInfo)" Union="true" AllowDuplicateResources="true" AllowedDuplicateNamespaces="Mono.CompilerServices" />
     <Message Importance="high" Text="ILRepack: merged mcs.dll into $(MergedModPath)" />
   </Target>
 
