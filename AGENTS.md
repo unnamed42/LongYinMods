@@ -312,6 +312,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 给游戏方法挂 Harmony 补丁 | [docs/harmony-il2cpp.md](docs/harmony-il2cpp.md) |
 | 读写原生内存、装自制 detour、用 Iced 汇编 stub | [docs/native-hooks.md](docs/native-hooks.md) |
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
+| **给 MelonMCP 加工具 / 修它的工具** | [docs/mcp-tool-proposals.md](docs/mcp-tool-proposals.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
 | 看某个 mod 的设计与取舍 | [docs/friendlynoclip.md](docs/friendlynoclip.md)、[docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
 | **反编译别人的 mod 并重新编译**（无源码，要修它 / 改它） | [docs/mod-recompilation.md](docs/mod-recompilation.md) |

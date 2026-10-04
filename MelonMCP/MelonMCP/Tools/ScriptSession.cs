@@ -163,17 +163,31 @@ namespace MelonMCP.Tools
             string statementOutput = null;
 
             // 1. Expression mode.
+            //
+            // hasValue tracks whether we actually have a RESULT TO RETURN, not merely whether
+            // Evaluate() returned without throwing. Those are different: Evaluate() happily accepts
+            // a void-returning call such as `System.Console.WriteLine("x")` and yields null. Treating
+            // that as "has a value" set hasValue = true with value == null, which then SKIPPED
+            // statement mode below - so the snippet ran but its output was thrown away, and the caller
+            // got the same bare "Execution completed (no result)" that a genuinely value-less snippet
+            // produces. The two are impossible to tell apart, which is exactly what made this bug
+            // expensive: it looks like "my query was wrong" and sends you editing correct code.
+            //
+            // Falling through on null is also what makes void statements work at all: statement mode
+            // re-runs the code under _evaluator.Run(), which is where a void call's diagnostics
+            // (captured output) come from.
             _diagnostics.GetStringBuilder().Clear();
             string expressionError;
             try
             {
                 value = _evaluator.Evaluate(code);
-                hasValue = true;
+                hasValue = value != null;
                 expressionError = null;
             }
             catch (Exception ex)
             {
                 expressionError = ex.Message;
+                value = null;
             }
 
             // 2. Statement mode, used both when expression mode rejected the input and when it
@@ -312,7 +326,13 @@ namespace MelonMCP.Tools
 
             if (parts.Count == 0)
             {
-                return "Execution completed (no result).";
+                // "Ran fine, produced nothing" and "something went wrong" must never share a message.
+                // A successful-but-empty result is a legitimate answer (a void call, a declaration with
+                // no trailing expression) and the caller should move on; before this branch existed,
+                // the wording was identical to a failure and cost real time chasing correct code.
+                return "Executed successfully; no value returned. If you expected a result, end the "
+                     + "snippet with a bare trailing expression (not 'return x') — declarations and "
+                     + "void calls produce no value on their own.";
             }
 
             return string.Join("\n", parts);

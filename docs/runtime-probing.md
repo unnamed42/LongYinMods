@@ -49,8 +49,8 @@
   （`Where`/`Select`/`OrderBy`/`ToArray`）、`string.Join`、`typeof`、泛型类型、带局部变量的多语句。
 - ✅ **会话状态跨调用保持**（变量 / using / 自定义类型）；`execute_csharp` 传 `reset=true` 清空。
 - ❌ **不支持 `return x`** —— 见下方“注意事项”表（用裸尾表达式）。
-- ⚠️ **已知问题**：**一整条超长单行表达式**（如整串 `string.Join(...Where(...Select(...)))`）
-  会**静默**返回 `Execution completed (no result)`；拆成两条语句（先赋值再拼接）即正常。
+> ✅ **曾经的两个「静默失败」已修（2026-10）。** 如果你的会话里模型还在说「拆成两条语句」，
+> 那是旧经验。根因见下方「`execute_csharp` 的三类结果」。
 
 ⚠️ **已禁用的工具（不要再尝试，它们会让 MCP 客户端看到一个名字却永远失败）**：
 
@@ -71,7 +71,7 @@
 | 现象 | 原因 / 对策 |
 |---|---|
 | **表达式里不能用 `return x`** | 交互式宿主方法返回 `void`，`return x` 报 `error CS0127`。**用裸尾表达式**：`var n = "x"; "hello " + n` |
-| 一整条超长单行表达式（如整串 `string.Join(...Where(...Select(...)))`）静默无结果 | 拆成两条语句 |
+| ~~一整条超长单行表达式静默无结果~~ | ✅ **已修**（2026-10），见下方「三类结果」 |
 | `Count` 报错 | 它是**方法**不是属性 → 写 `.Count()` |
 | `FindObjectsOfType<T>()` 找不到游戏数据类 | `GridUnitData` / `BattleUnit` 之类**不是 `UnityEngine.Object`**；要经游戏自己的容器取（如 `BattleController.battleMapData.GetGridData(r, c)`） |
 | `FindObjectOfType<Il2Cpp.Xxx>()` 报 `Method unstripping failed` | 改用 `FindObjectsOfType<MonoBehaviour>(true)` 按 `GetType().Name` 过滤 |
@@ -116,6 +116,50 @@
 > `OnInitializeMelon` 里一次性安装的原生 detour —— **改了值不会卸载已装的 hook**。
 > 而 `diagnostics` 在每次用的时候读 `.Value`，**改了立即生效**。
 
+#### `execute_csharp` 的三类结果（及曾经的静默失败）
+
+**这三种情况必须能分辨** —— 混在一起会让人在**正确的代码**里找不存在的 bug
+（`AGENTS.md` 纪律 1）。现在它们确实是分开的：
+
+| 结果文本 | 含义 | 你该做什么 |
+|---|---|---|
+| 值 / 文本 | 成功，有返回值 | — |
+| `Executed successfully; no value returned. ...` | 成功，但**没值** | 正常。要值就加**裸尾表达式** |
+| `(行,列): error CS....` | **编译失败** | 改代码 |
+| `Execution failed: ...` | 运行时异常 | 看栈 |
+
+**❗ 两个曾经的陷阱（已修，但旧会话/旧文档里还留着错经验）：**
+
+1. **「一整条超长单行表达式静默无结果」→ 拆成两条**
+2. **「循环体复杂就静默无结果」→ 用 `reset=true`**
+
+两者其实是**同一个 bug**，且根因不在“表达式太长”或“循环太复杂”：
+
+```csharp
+// 旧代码（ScriptSession.Run 的表达式模式）
+value = _evaluator.Evaluate(code);
+hasValue = true;          // ← 无条件置 true，哪怕 value 是 null
+```
+
+`Mono.CSharp` 的 `Evaluate()` **对返回 void 的调用不报错，只是返回 `null`**
+（例：`System.Console.WriteLine("x")`）。于是：
+
+- `hasValue = true` + `value = null` →
+- 下面那个 `if (!hasValue)` **不成立** → **整个语句模式被跳过**
+- → 得到一句与「真的无值」完全相同的 `Execution completed (no result).`，
+  **既不报错、也无栈** —— 看起来就像“我查询写错了”。
+
+修法是一行：`hasValue = value != null;` —— null 结果**落到语句模式**，
+由 `Run()` 重新执行并正常捕获编译/运行时错误。
+
+> ⚠️ **`Console.WriteLine` 的输出从来不会被捕获** —— `_diagnostics` 是
+> **编译器**的 report printer（错误/警告），不是运行时的 stdout。
+> 用 `Console.WriteLine` 调试本就不行，得用**裸尾表达式**返回值。
+> （这条容易被误为是同一个 bug，但两者无关。）
+
+实测（2026-10，活进程）：同样是 void 调用 + 声明，
+修复前一律回 `Execution completed (no result).`；修复后回明确的
+「成功但无值」，而带裸尾表达式的写法一直正常。
 ### 7.2 日志与文件路径
 
 - **日志**：`gamedir/MelonLoader/Latest.log`
