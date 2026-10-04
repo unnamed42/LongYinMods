@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>ForceOverflowDividend</AssemblyName>
+    <RootNamespace>ForceOverflowDividend</RootNamespace>
+    <OutputType>Library</OutputType>
+    <Deterministic>true</Deterministic>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
+
+    <!-- 构建指纹：嵌一个「构建时刻」进去。本项目因为「跑的是旧产物」白耗过两轮，
+         症状与逻辑 bug 无法区分，有时间戳一眼就能判断。 -->
+    <BuildStamp>$([System.DateTime]::UtcNow.ToString('yyMMdd-HHmmss'))</BuildStamp>
+    <Version>1.0.1+$(BuildStamp)</Version>
+    <InformationalVersion>$(BuildStamp)</InformationalVersion>
+    <Authors>SaintCirno9 (original), unnamed42 (fix)</Authors>
+    <Description>门派资源溢出折现为金钱，按门派成员人口权重分配</Description>
+
+    <GameDir>..\gamedir</GameDir>
+    <Il2cppDir>..\gamedir\MelonLoader\Il2CppAssemblies</Il2cppDir>
+    <MelonLoaderDir>..\gamedir\MelonLoader\net6</MelonLoaderDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MelonLoader">
+      <HintPath>$(MelonLoaderDir)\MelonLoader.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(MelonLoaderDir)\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(MelonLoaderDir)\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(Il2cppDir)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Il2CppSystem 命名空间（List<T> 等）不在这三个之外，缺一不可。 -->
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(Il2cppDir)\Il2Cppmscorlib.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem.Core">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- UnityEngine.CoreModule：MonoBehaviour 等核心类型在这里，不引会 CS0012。 -->
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(Il2cppDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(Il2cppDir)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="MelonLoader.MelonInfo">
+      <_Parameter1>ForceOverflowDividend.Main</_Parameter1>
+      <_Parameter1_TypeName>System.Type</_Parameter1_TypeName>
+      <_Parameter2>ForceOverflowDividend</_Parameter2>
+      <_Parameter3>$(Version)</_Parameter3>
+      <_Parameter4>SaintCirno9</_Parameter4>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="MelonLoader.MelonGame">
+      <_Parameter1>TppStudio</_Parameter1>
+      <_Parameter2>LongYinLiZhiZhuan</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
