@@ -1067,8 +1067,8 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 | `NativeHookBase.cs` | **抽象基类** —— 安装/卸载骨架 + 共用工具（`RuntimeVa` / `EmitJumpViaR11` / `IsRel32Jcc` / `Hex`）。子类只写差异：`Tag` / `HookVa` / `HookSiteVa` / `OriginalBytes` / `ValidateSite` / `BuildStub` |
 | `FriendlyPassHook.cs` | **穿友方** ✅ 在用 —— hook `0x180a8d929`，按 `battleTeam.ID` 判队伍 |
 | **`WallPassData.cs`** | **★ 穿己方城墙的核心** ✅ 在用 —— 写 `GridUnitData.passes`（§2.2c） |
-| `WallPassHook.cs` | 改 `Navigate` 的判定 ✅ 在用（`wall_pass_hook`），但**城墙功能已不再依赖它** |
-| `WallHighlightHook.cs` | ⚠️ **实验性、已验证会崩溃、默认关闭**（`wall_highlight_hook=false`）。保留仅为记录与将来可能的重做 |
+| `WallPassHook.cs` | 改 `Navigate` 的判定 ✅ 在用（随 `wall_pass` 自动安装），但**城墙功能已不再依赖它** |
+| `WallHighlightHook.cs` | 🗑️ **已删除**（commit `70e23b7`）。它已验证会崩溃且非功能所需；追溯到 `e3cd3b3`，见 §2.1 |
 | `NativeProbeLog.cs` | 回溯探针 —— **默认不启用**（每进 hook 写 112 字节 + 2s 落盘，有开销）。保留供将来排查 |
 | `NativeMemory.cs` | 模块定位 / 签名扫描 / 原生读写 / `VirtualProtect` / `WriteInt32` |
 
@@ -1379,20 +1379,20 @@ FriendlyPassHook  手写 60 字节 / Iced 60 字节   ✅ 逐字节完全一致
 | # | 事项 | 状态 |
 |---|---|---|
 | 1 | 城墙/城防穿越 | ✅ **已完成并实机确认可用**。最终实现是写 `GridUnitData.passes`（§2.2c），不是 hook 判定 |
-| 2 | 城墙穿越崩溃 | ✅ **已结案**，由 `WallHighlightHook` 引起，已默认关闭（§8.1） |
+| 2 | 城墙穿越崩溃 | ✅ **已结案**，由 `WallHighlightHook` 引起，**该功能已整体删除**（§8.1） |
 | 4 | 「穿越不留痕」的时序验证 | `OnLeave` 在**离开**时触发，而覆盖发生在 **`OnEnter`** 时刻。若游戏在两格之间做了别的读取（如渲染），修复可能**太晚**。判据：若出现「中途闪一下被穿单位的模型消失」，说明太晚 → 需转「手写 `OnEnter` 替代实现」 |
 | 5 | 箭塔/战鼓/分舵是否会被误穿 | 实测它们是**普通 `BattleUnit`**（`g.obstale == null`），归「穿友方」那条线按队伍处理。**当前无异常**，但守城战里需再看一眼 |
 
 ### 8.1 ✅ 城墙穿越崩溃（2026-10-04，**已结案**）
 
-**结论：由 `WallHighlightHook` 引起，且它并非功能所需 → 默认关闭，问题消失。**
+**结论：由 `WallHighlightHook` 引起，且它并非功能所需 → 该功能已删除（`70e23b7`），问题消失。**
 
 **二分过程**（每轮均冷启动，日志以构建指纹核实版本）：
 
 | 轮次 | 配置 | 结果 |
 |---|---|---|
 | 1 | `wall_native_hooks=false` | **不崩**（`passes` 仍在，22 面）→ 排除数据写入与既有问题 |
-| 2 | `wall_pass_hook=true` + `wall_highlight_hook=false` | **不崩，且城墙穿越可用** ✅ |
+| 2 | 装 `WallPassHook`、不装 `WallHighlightHook` | **不崩，且城墙穿越可用** ✅（当时是二分；现已固化为「只装前者」） |
 
 **为何高亮 hook 不是必需的**：`passes` 已让 `Navigate` 能穿墙；
 而墙对面格子亮不亮，本来就由**游戏自己的** `GetMoveRangeGrids` 调 `Navigate` 决定。
