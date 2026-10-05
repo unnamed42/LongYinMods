@@ -67,6 +67,24 @@
 
 实现在源码里保留了，注册处用 `#if MELONMCP_ENABLE_BROKEN_INSPECTION_TOOLS` / `#if MELONMCP_ENABLE_BROKEN_SCREENSHOT` 关掉——**修好后开宏即可，不要重写**。
 
+#### ⚠️ 这批工具的共同死因：**靠反射通用地发现**
+
+上面几条失败原因不一样，但**根因是同一个**：它们都在试「自动发现组件 / 属性」，
+而这在 IL2CPP 下会**塌缩** —— 所有组件都报成 `UnityEngine.Component`，
+反射枚举属性又全装箱成 `Il2CppSystem.Object`，读不出值。
+
+**`inspect_unity_object` / `dump_menu_state` 能工作，正是因为它们反其道而行：**
+
+| 已禁用的做法 | 能工作的做法 |
+|---|---|
+| 自动发现组件 / 属性 | 调用方**显式给出** `typeName` + `fields` |
+| `GetComponents`（塌缩） | `FindObjectsOfTypeAll<T>` / 非泛型重载（已验证可用） |
+| 一处失败 → 整个工具失效 | 每字段 / 每实例独立 try/catch |
+
+> 🚫 **不要把这两个工具「改进」成自动字段发现器。**
+> 那个约束不是实现细节，**它就是工具能工作的原因**。
+> 真要修那批禁用工具，是**独立议题**（得先解决 IL2CPP 代理塌缩），不要和它们混在一起。
+
 仍有部分工具**只有 `instanceId` 分支是死的**（`path` 分支正常）：`instantiate_object` / `set_transform` / `destroy_object`。它们依赖 `UnityHelper.FindObjectByInstanceId`，后者依赖一个在 IL2CPP 下解析为 null 的非泛型 `FindObjectsOfType` 反射查找。**用 `path` 寻址，别传 `instanceId`。**
 
 **注意事项（踩过的坑）**：
@@ -570,6 +588,7 @@ c3                    ret
 | `heap_objects` | 枚举某类型的**活对象** | ⏸️ **TODO**。导出存在且能跑（实测 3169 对象 / 86 ms），但**回调里做类型筛选会爆栈**。要先解决「在原生侧拿到 klass 指针并按类型过滤」，详见下方 |
 | `hook_patch_info` 的 `hitCount` | 「补丁挂上了，但到底触发了几次」 | ❌ **已否决** —— 实现必然自指，反而破坏它要回答的问题，详见下方。它同时否决了 `count_calls` |
 | `count_calls` | 不写代码就能数某函数被调用了几次 | ❌ 同上，同一个难点 |
+| `search_pseudocode` 的**转发桩过滤** | 它会把 IL2CPP 转发桩当结果返回，**噪音很大** | ⏸️ **TODO**。方法体只有 `il2cpp_runtime_invoke` 的桩应被过滤。目前**无过滤**（`GameKnowledgeTools.cs` 里搜不到相关逻辑）。找调用关系用 `tools/find_callers` 更有效 |
 
 #### ⏸️ `heap_objects` 的接手须知
 
