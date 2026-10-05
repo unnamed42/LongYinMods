@@ -283,6 +283,7 @@ internal static class WallPassData
         }
     }
 
+    /// <summary>
     /// 把 <see cref="Apply"/> 改过的格子恢复成原值。战斗结束时调用。
     /// </summary>
     internal static void Restore()

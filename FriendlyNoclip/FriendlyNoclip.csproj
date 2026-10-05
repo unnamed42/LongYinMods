@@ -39,7 +39,7 @@
          「跑的是不是新产物」改为靠**部署后核对 md5**：
          Deterministic 生效后 md5 是稳定的，这才是可靠的判据。
          启动日志也会打印自身 md5（见 Plugin.cs），可直接对账。 -->
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>unnamed42</Authors>
     <Description>移动时允许穿越友方和城防</Description>
 
