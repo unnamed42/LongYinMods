@@ -44,37 +44,73 @@
 
 ## 2. 实现
 
-### 2.1 开关一览（含已弃用的）
+### 2.1 开关一览（**只有 4 个**）
 
 ```toml
 [FriendlyNoclip]
-# ——— 功能开关（日常只需要这三个）———
-native_detour = true         # ★ 能穿友方单位
-wall_pass     = true         # ★ 能穿己方城墙（写 passes）
-fix_occupancy = true         # ★ 穿越不留痕（写回被踩掉的登记）
+# ——— 功能开关（用户只需要看这两个）———
+native_detour  = true    # ★ 穿越友方单位
+wall_pass      = true    # ★ 穿越己方城墙（可跨越、不可停留）
 
-# ——— 城防的两个原生 detour（二分级）———
-wall_pass_hook      = true   # WallPassHook（改 Navigate）—— 安全，保留
-wall_highlight_hook = false  # ★ 保持关闭：已验证会崩溃且非功能所需（§7.1c）
-
-# ——— 诊断（平时关）———
-diagnostics    = false
-dump_all_grids = false
+# ——— 调试开关（平时关，排查时才开）———
+diagnostics    = false   # 全部信息性日志的总开关（§2.1b）
+dump_all_grids = false   # 整图 dump（极慢）
 ```
 
 | 开关 | 作用 | 关掉会怎样 |
 |---|---|---|
-| `native_detour` | `Navigate` 内 `0x180a8d929` 的 detour，**允许穿过友方单位** | **穿不过友方** |
-| `wall_pass` | 写 `GridUnitData.passes`（§2.2c），**允许穿过己方城墙** | 穿不过己方城墙 |
-| `fix_occupancy` | `EnterGrid` Prefix + `OnLeave` Postfix，**写回被踩掉的登记** | 能穿，但**被穿的 NPC 点不动** |
-| `wall_no_stop` | `BattleUnit.EnterGrid` Prefix，**城墙不可停留**（§2.2d） | **AI 会站到城墙上** |
-| `fix_occupancy` | 同上钩子，**不得停在已占用的格子**（§2.2e） | **NPC 与箭塔等设施重叠** |
-| `wall_pass_hook` | `Navigate` 内 `0x180a8d8b6` 的 detour | 不影响（已被 `passes` 方案覆盖） |
-| `wall_highlight_hook` | 改 `GetMoveRangeGrids` 的两处判定 | **无影响，且它开着会崩** |
+| `native_detour` | `Navigate` 内 `0x180a8d929` 的 detour + **配套的「穿越不留痕」** | **穿不过友方** |
+| `wall_pass` | 写 `GridUnitData.passes`（§2.2c）+ **配套的「不可停留」** + 必要的 detour | **穿不过己方城墙** |
+| `diagnostics` | 全部信息性日志 | 只剩真正的错误（§2.1b） |
+| `dump_all_grids` | 每次调用都 dump 整张地图的网格明细 | 无（仅为排查） |
 
-> ⚠️ **僵尸键**：`wall_ignore_team` 与 `wall_native_hooks` 是二分定位时期的开关，
-> 已从代码删除，cfg 里的两条也**已手工清理**（2026-10）。
-> 以后再遇到这类键直接删掉即可 —— MelonPreferences **不会自动清理已废弃的键**。
+#### ⭐ 设计原则：**配套功能不应该能单独生效**
+
+曾经有 **9 个**开关，其中 4 个是「配套实现」。它们的共同问题是：
+**分开时用户可以配出坏状态，而用户无从判断哪个组合是对的。**
+
+| 已删除的开关 | 去向 | 为什么 |
+|---|---|---|
+| `fix_occupancy` | → 并入 `native_detour` | 「写回被踩掉的登记」是「穿友方」的必要配套。**没有它，穿过的单位不再有反应、同一格能站两个人**（用户实测确认） |
+| `wall_no_stop` | → 并入 `wall_pass` | 「不可停留」是「可跨越」的必要配套。分开时能配出「能穿但能站上去」——**那正是实测到的 AI 站墙** |
+| `wall_pass_hook` | → 并入 `wall_pass` | 已被 `passes` 方案覆盖，关掉不影响功能 |
+| `wall_highlight_hook` | → **删除** | 会崩溃且非功能所需，见下 |
+
+> 💡 合并的价值不只是「少几个选项」，而是**让错误配置在结构上不存在**。
+
+#### 已删除功能的追溯（`wall_highlight_hook` / `WallHighlightHook.cs`）
+
+它改的是 `GetMoveRangeGrids` 里的两处障碍判定，目的是让城墙格本身也亮。
+但实测**开着它打完一场必崩**（FailFast，dump 帧紧跟 `call GetMoveRangeGrids`），
+而且**不是功能所必需的** —— `passes` 已让 `Navigate` 能穿墙，
+墙对面格子亮不亮本来就由游戏自己调 `Navigate` 决定（§2.2c）。
+
+**追溯锚点**（要找回它就从这些 commit 查）：
+
+| 内容 | commit |
+|---|---|
+| 删除本次（含理由） | `70e23b7` |
+| 最后一次改动（日志门控） | `ec7f729` |
+| Iced 汇编器迁移 | `795dac9` |
+| 文档重构 | `359c483` |
+| 修 ValidateSite 的 ModRM 掩码 | `162746c` |
+| 校验基准与落点混为一谈 | `b7408e7` |
+| **初次引入** | `e3cd3b3` |
+
+```bash
+# 取回完整实现
+git show e3cd3b3:FriendlyNoclip/WallHighlightHook.cs
+git log --all --oneline -- FriendlyNoclip/WallHighlightHook.cs
+```
+
+> ⚠️ 文档里其余提到 `WallHighlightHook` 的地方都标注了「已删除」，
+> 保留描述是为了**不丢掉那次排查的结论**（尤其 §7.1c 的崩溃分析）。
+
+#### 更早的僵尸键
+
+`wall_ignore_team` 与 `wall_native_hooks` 是二分定位时期的开关，
+已从代码删除，cfg 里的两条也**已手工清理**（2026-10）。
+以后再遇到这类键直接删掉即可 —— MelonPreferences **不会自动清理已废弃的键**。
 
 ### 2.1b 日志策略：`diagnostics` 是**总开关**
 
