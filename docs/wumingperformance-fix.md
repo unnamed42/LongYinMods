@@ -235,21 +235,33 @@ System.Threading.ThreadStateException: Thread is dead; state cannot be accessed.
 
 ---
 
-## 7. 与另一个卡死的区分
+## 7. 与另两种卡死的区分
 
-本项目遇到过**两种**卡死，别混：
+本项目遇到过**三种**卡死。前两种在 mod 层面，可以处理；第三种**不在我们的层面**：
 
-| | 本文（退出卡死） | 运行中卡死（另一问题） |
-|---|---|---|
-| 时机 | 点退出后 | 时间流逝过程中 |
-| 进程状态 | `S`（sleeping） | `R`（running） |
-| CPU | **0%** | **~100%（单核烧满）** |
-| 主线程位置 | Wine `ioctl` | **`GameAssembly.dll` 内死循环** |
-| 主线程 PC | 不动 | **固定在同一个地址** |
-| 与 WuMing | **有关** | **无关**（不启用它也发生） |
+| | 本文（退出卡死） | 运行中卡死 | wineserver 阻塞 |
+|---|---|---|---|
+| 时机 | 点退出后 | 时间流逝中 | **Alt-Tab 切窗口后** |
+| 进程状态 | `S` | `R`（running） | `S` |
+| CPU | **0%** | **~100%（单核烧满）** | **0%** |
+| 主线程位置 | Wine `ioctl` | **`GameAssembly.dll` 内死循环** | **读 wineserver 的 pipe** |
+| 与 WuMing | **有关** | **无关** | **无关** |
+| 能否修 | ✅ 已修（本文） | 未定位 | ❌ **不在我们的层面** |
+第二种（运行中卡死）是游戏原生代码里的死循环（现场：两个线程用 24 字节步长扫同一张表），
+**至今未定位**。
 
-后者是游戏原生代码里的死循环（现场：两个线程用 24 字节步长扫同一张表），
-**至今未定位**。见 [`runtime-probing.md`](runtime-probing.md) 的退出/卡死排查章节。
+第三种（wineserver 阻塞）：Alt-Tab 后主线程卡在 `read()` 一个 **wineserver 持有的 pipe** 上，
+且**所有托管线程**（含 `Job.Worker`、`.NET Finalizer`、MCP 的线程池线程）都阻塞在同一类
+`read()` 上 —— 即**整个托管层在等 wineserver 回应**，而 wineserver 自身睡在 `ep_poll`。
+
+> **为何不再往下查**：这属于 **Wine/Proton 层的同步问题，不是 mod 或 .NET 的问题**。
+> 而且它直接推翻了「给 MCP 换专用线程就能保活」的想法 —— 在 wineserver 级阻塞下
+> **进程内任何手段都救不了**（线程全冻）。想看栈只能从**进程外**（宿主侧 `gdb`/`eu-stack`），
+> 那正是本项目已有排查手段。
+>
+> **绕过思路**（未验证）：Alt-Tab 前先进菜单/暂停；或试 gamescope / `PROTON_USE_WINED3D=1`。
+
+均见 [`runtime-probing.md`](runtime-probing.md) 的退出/卡死排查章节。
 
 ---
 
