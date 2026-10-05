@@ -325,6 +325,11 @@ namespace MelonMCP
             // the caller names. That inversion is what keeps it working under IL2CPP.
             _server.RegisterTool(new InspectUnityObjectToolDefinition());
 
+            // UI button state dump. Reports three flags per button because the interesting case is
+            // exactly where they disagree: a leftover button stays interactable and
+            // activeInHierarchy while enabled goes false.
+            _server.RegisterTool(new DumpMenuStateToolDefinition());
+
             // Configuration tools. Built on MelonPreferences (part of MelonLoader itself) rather
             // than on MelonPreferencesManager, so they work on any MelonLoader install and do not
             // require a human-facing in-game UI that an agent could not open anyway.

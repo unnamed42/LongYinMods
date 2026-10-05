@@ -33,6 +33,7 @@
 - **配置读写工具**：`list_configs` / `get_config` / `set_config` / `reset_config`（读写 MelonLoader 偏好设置，见 §7.1.1）。
 - **批量读字段**：`inspect_unity_object`（按类型枚举实例 + 读点号路径字段，见 §7.1.2）。
 - **日志分组**：`read_logs` 带 `group_by="prefix"` 时返回**按频率排序的分组计数**，用于判断「哪条日志在刷屏」（见 §7.1.3）。
+- **UI 按钮状态**：`dump_menu_state`（枚举按钮 + 三个状态标志，见 §7.1.4）。
 - **持久化的知识库**：`get_game_knowledge` / `add_game_knowledge`。
   ⚠️ **它只用于存「游戏本身的知识」**（世界观、设定、数值规则、游戏机制这类**与 mod 开发无关**、
   且**游戏更新也大体不变**的内容）。
@@ -228,6 +229,54 @@ Log groups by prefix  (8 group(s) over 173 line(s))
 
 → **「这里没有」不等于「从来没打过」**。排查时优先用 `Warning`/`Error` 打日志，
 或直接读磁盘上的 `MelonLoader/Latest.log`。
+
+#### 7.1.4 `dump_menu_state` —— 枚举 UI 按钮与状态
+
+一条调用替代「手写 `FindObjectsOfType<Button>` + `GetComponentsInChildren<Text>` 循环」，
+输出每个按钮的三个状态标志：
+
+```
+4 buttons:
+  [拆除]     enabled=false interactable=true  activeInHierarchy=true  sibling=0
+  [取消拆除] enabled=true  interactable=true  activeInHierarchy=true  sibling=3
+```
+
+##### ⭐ 为什么要读**三个**标志
+
+**残留按钮的判据是 `enabled=false`，而 `interactable` 与 `activeInHierarchy` 仍是 `true`。**
+
+只看 `interactable` 或只看 `activeInHierarchy` 都会把残留按钮判成「可用」——
+这正是本项目那次排查的核心发现，也是这个工具存在的理由。
+`usableCount` 字段按「三个都为 true」统计，避免调用方各读一个。
+
+##### ⚠️ 实例来源差 **100 倍**，必须显式选
+
+| API | 实测数量 | 含义 |
+|---|---|---|
+| `Object.FindObjectsOfType<Button>()` | **9** | 只在**活动场景**里的 |
+| `Resources.FindObjectsOfTypeAll<Button>()` | **951** | 另外包括**非活动对象**与**其它已加载场景** |
+
+两者都对，只是回答不同问题。工具用 `includeInactive`（**默认 false**）暴露这个选择，
+而不是偷偷替你选一个。
+
+实测 `includeInactive=true` 时，前 500 个里 **usable=0** —— 那 942 个是池化 / 预制体 /
+其它场景的对象，**不是当前菜单**。当菜单 dump 用只会淹没结果。
+
+##### ⚠️ 必须**一次性**枚举 + 读取
+
+部分菜单的内容在游戏自己的 `Update` 里重建。分两次 MCP 调用读「按钮集合」和「各自状态」，
+实际比较的是**两个不同的集合** —— 本项目实测出现过「上次 4 个按钮、下次 1 个」的
+自相矛盾读数，**看起来像数据问题，其实是时序问题**。
+
+工具内部先把集合与状态一起取完再返回，从根上消除这一类误判。
+
+##### 用法要点
+
+- `rootPath`：限定到某个面板的后代（如 `Canvas/MainMenu`）。**`GameObject.Find` 只匹配活动对象**，
+  所以非活动面板无法这样寻址 —— 那种情况直接省略 `rootPath` 并配 `includeInactive`。
+- `labelOnly`：只看有文字标签的。默认 false —— 无标签的按钮**仍是按钮**，静默丢掉会掩盖状态。
+- 每个按钮独立 try/catch：池化对象里有已销毁的，一坏一格不影响整批
+  （实测扫全部 951 个，`readErrors` 为 0）。
 
 #### `execute_csharp` 的三类结果（及曾经的静默失败）
 

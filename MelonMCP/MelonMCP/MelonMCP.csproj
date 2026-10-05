@@ -120,6 +120,15 @@
       <Private>false</Private>
     </Reference>
     <!--
+      UnityEngine.UI holds Button and Text, needed by dump_menu_state. Referencing CoreModule is
+      not enough: the UnityEngine.UI namespace lives in its own assembly, and without this the
+      compiler reports "UnityEngine.UI does not exist" as if the namespace were misspelled.
+    -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(UnityPath)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!--
       Il2Cppmscorlib supplies Il2CppSystem.Type and Il2CppSystem.Object, which the non-generic
       Resources.FindObjectsOfTypeAll(Il2CppSystem.Type) overload needs. Without this reference the
       compiler reports those two types as missing from Il2CppSystem: the namespace resolves via
