@@ -73,7 +73,7 @@ Works with both **Mono** and **IL2CPP** Unity games.
 ### Prerequisites
 - [MelonLoader](https://github.com/LavaGang/MelonLoader) installed on your Unity game
 - .NET 6.0 runtime
-- Python 3.8+ (for the MCP bridge)
+- Any MCP client that speaks the Streamable HTTP transport (no Python or bridge script required)
 
 ### Steps
 
@@ -94,20 +94,26 @@ Works with both **Mono** and **IL2CPP** Unity games.
 
 ## Configuration
 
-### MCP Bridge Setup
+### Streaming HTTP Setup
 
-MelonMCP uses a TCP socket (default port 27015). To connect MCP clients, use the included Python bridge:
+MelonMCP speaks the MCP **Streamable HTTP** transport on `http://127.0.0.1:27015/mcp`.
+**No bridge script is needed** - point the client at a URL:
 
 ```json
 {
   "mcpServers": {
     "melonmcp": {
-      "command": "python",
-      "args": ["path/to/mcp-bridge.py", "--host", "localhost", "--port", "27015"]
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:27015/mcp"
     }
   }
 }
 ```
+
+> The previous TCP socket + `mcp-bridge.*` scripts have been **removed**. A raw TCP listener can
+> never be connected to directly: the stdio binding requires the *client* to spawn the server
+> process, and this server lives inside the game process - so an intermediate translator was
+> always required. The protocol's HTTP transport removes that layer entirely.
 
 ### Custom Port
 

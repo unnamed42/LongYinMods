@@ -26,18 +26,12 @@ namespace MelonMCP.Tools
         public override bool RequiresMainThread => false;
 
 
-        public override string Description => @"Report the runtime patch state of a method: which patcher Harmony
-actually selected and whether it is valid, the exact bound target signature and IL address, every
-prefix/postfix/transpiler with its owner and priority, and the method's REAL runtime entry bytes.
+        public override string Description => @"Report the runtime patch state of a method: the patcher Harmony actually selected and whether it is
+valid, the bound signature, and every prefix/postfix/transpiler with owner and priority.
 
-Use this before concluding 'the patch did not fire'. Key readings:
-- patcherIsValid == false on an Il2CppDetourMethodPatcher means the native detour was never installed;
-  native callers bypass the patch even though Harmony reported success.
-- entryBytes starting with 'ff 25' is the HEALTHY state for a patched IL2CPP method (Il2CppInterop's
-  detour is installed). It does NOT mean Harmony was bypassed.
-- prefixes/postfixes counts of 0 mean nothing is attached to this method at all.
-
-Pass either typeName + methodName, or owner to list everything a given mod has patched.";
+Use this before concluding a patch did not fire. patcherIsValid=false means it could not be installed
+and will not run even though Harmony reported success; zero patches means nothing is attached. Counts
+cover only your query - list_patches shows every mod on every method.";
 
         protected override ToolInputSchema GetInputSchema()
         {

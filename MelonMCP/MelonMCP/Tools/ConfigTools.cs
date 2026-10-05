@@ -214,19 +214,15 @@ namespace MelonMCP.Tools
         public override bool RequiresMainThread => false;
 
 
-        public override string Description => @"List every MelonLoader preference category and entry, with current
-value, default value, declared type and description.
+        public override string Description => @"List MelonLoader preference categories and their entries with current value, default, type and
+description.
 
-This reads the LIVE in-memory model (MelonPreferences), not the .cfg file. The two can differ: a mod
-or the user may have changed a value without saving.
+Reads the LIVE in-memory model, not the .cfg file - the two can differ if something changed a value
+without saving. Use it to find the exact mod + key for get_config / set_config.
 
-Use this to find the exact category + key to pass to get_config / set_config. Pass 'mod' to narrow
-it to one category (e.g. 'FriendlyNoclip'), and 'changedOnly' to see just the entries whose current
-value differs from its default - usually the fastest way to see what has been tweaked.
-
-NOTE: a value shown here is what the process intends to use; it does not prove the setting is
-currently in effect. Values read at their point of use apply immediately; values consumed during
-OnInitializeMelon (typically anything that installs a native hook) were baked in at startup.";
+A value shown here is what the process intends to use, not proof the setting is in effect: one
+consumed during OnInitializeMelon (installing a native hook or Harmony patch) was baked in at
+startup.";
 
         protected override ToolInputSchema GetInputSchema()
         {
@@ -463,21 +459,12 @@ from the declared default - useful before deciding whether a reset is warranted.
 
         public override string Description => @"Set one MelonLoader preference entry and save it to disk.
 
-Writes through MelonPreferences (the live model) rather than editing MelonPreferences.cfg directly.
-This matters: MelonPreferences rewrites the whole file from memory, so a hand-edited .cfg is lost the
-next time anything calls Save(). Callers must pass 'confirm' with the same mod+key, so a mistargeted
-write cannot land silently.
+Writes through the live MelonPreferences model, not the .cfg file: MelonPreferences rewrites the
+whole file from memory, so a hand-edited .cfg is lost on the next save.
 
-IMPORTANT - restart semantics are yours to determine, not this tool's to guess:
-- A value read as `entry.Value` at its point of use applies immediately.
-- A value consumed once inside OnInitializeMelon - typically anything that INSTALLS a native hook or
-  a Harmony patch - is already baked into the running process. Writing the new value here changes
-  what the NEXT launch will do; it does not retract a hook that is already installed.
-Reading 'true' back after this call proves the value was stored, NOT that the behaviour changed.
-This tool does not attempt to detect which case applies, because that depends on each mod's
-internals and a wrong guess is worse than no guess.
-
-Returns the previous value so the change can be undone or verified.";
+Restart semantics are yours to determine. A value read at its point of use takes effect now; one
+consumed during OnInitializeMelon (installing a native hook or Harmony patch) only changes the NEXT
+launch. Reading it back proves it was stored, not that behaviour changed. Returns the previous value.";
 
         protected override ToolInputSchema GetInputSchema()
         {

@@ -18,33 +18,14 @@ namespace MelonMCP.Tools
     public class ExecuteCSharpToolDefinition : ToolDefinitionBase
     {
         public override string Name => "execute_csharp";
-        public override string Description => @"Execute C# code at runtime in the Unity game context.
-The code has access to:
-- All Unity namespaces (UnityEngine, UnityEngine.SceneManagement, etc.)
-- All game assemblies and types
-- MelonLoader APIs
+        public override string Description => @"Execute C# in-process; all Unity, game and MelonLoader types are available.
 
-Full C# is supported: variables, operators, foreach, new, generics, lambdas and LINQ.
-State persists between calls; pass reset=true to clear it. A trailing expression is returned.
-LINQ extension syntax (x.Count(), x.Where(...), x.Select(...)) works on the first call after a reset.
+C# up to 7.2, EXCEPT: switch type patterns (case int i:) -> internal compiler error, use
+if (x is int i); when clauses, local functions and in parameters are not parsed; LINQ query syntax
+fails, use x.Where(...).Select(...).
 
-Examples:
-- UnityEngine.SceneManagement.SceneManager.GetActiveScene().name
-- string.Join("","", UnityEngine.Object.FindObjectsOfType<UnityEngine.Camera>().Select(c => c.name))
-- var go = UnityEngine.GameObject.Find(""Player""); go != null ? go.transform.position.ToString() : ""not found""
-
-CRASH RISK - READ BEFORE RUNNING HEAVY REFLECTION.
-This runs on the Unity main thread with a SMALL stack (about 82 KiB, measured). A stack overflow
-here CANNOT be caught: it is a guard-page fault in native code, so the process dies instantly with
-no exception, no log, and no chance to clean up. Two confirmed ways to trigger it:
-  - MakeGenericMethod / Type.MakeGenericType inside a loop, or across many types
-  - deep or recursive reflection over a large type set
-Prefer direct typed access. If a runtime-generic call is genuinely needed, do ONE per call and
-confirm it returned before doing another. For anything heavier, add a tool to the mod instead -
-compiled C# runs on a normal stack and cannot hit this.
-
-This call also cannot be interrupted: there is no working timeout, so an accidental infinite loop
-hangs the game until it is killed from outside.";
+State persists across calls; a trailing expression is returned. Runs on the Unity main thread with a
+small stack and cannot be interrupted: avoid MakeGenericMethod, deep reflection, infinite loops.";
 
         /// <summary>
         /// Session shared by all script tools. State (variables, usings, defined types) persists
@@ -118,15 +99,9 @@ hangs the game until it is killed from outside.";
     public class EvaluateExpressionToolDefinition : ToolDefinitionBase
     {
         public override string Name => "evaluate_expression";
-        public override string Description => @"Evaluate a single C# expression and return its value.
-Same engine as execute_csharp, so any expression form works (method calls, LINQ, operators,
-object construction, string concatenation). Use this for one-off reads.
-
-Examples:
-- UnityEngine.Time.time
-- UnityEngine.Application.productName
-- UnityEngine.QualitySettings.GetQualityLevel()
-- string.Join("","", UnityEngine.Object.FindObjectsOfType<UnityEngine.Camera>().Select(c => c.name))";
+        public override string Description => @"Evaluate one C# expression and return its value. Same engine
+and limits as execute_csharp, but for a single stateless read - use execute_csharp when you need
+variables or several statements.";
 
         protected override ToolInputSchema GetInputSchema()
         {

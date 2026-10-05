@@ -19,6 +19,12 @@ namespace MelonMCP
         public static MelonLogger.Instance Logger => Instance?.LoggerInstance;
 
         private MCPServer _server;
+
+        /// <summary>
+        /// The HTTP transport that fronts <see cref="_server"/>. Null when it failed to start, which
+        /// is a survivable state: the tools remain registered and the plugin stays loaded.
+        /// </summary>
+        private MCPHttpServer _httpServer;
         private readonly List<string> _logBuffer = new List<string>();
         private readonly object _logLock = new object();
         private const int MaxLogBufferSize = 1000;
@@ -85,11 +91,21 @@ namespace MelonMCP
                 // Register all tools
                 RegisterTools();
 
-                // Start the server
-                _server.Start();
+                // Streamable HTTP transport. Replaces the newline-delimited TCP listener, which no
+                // MCP client can connect to directly: the stdio binding requires the CLIENT to spawn
+                // the server, so a TCP listener always needed a bridge process in between. With HTTP
+                // the client is configured with a URL and nothing else.
+                //
+                // There is no assembly-availability check here any more. This transport is built on
+                // System.Net.Sockets, part of the core framework and always present. It previously
+                // wrapped System.Net.HttpListener, which had to be force-loaded by name - and which
+                // turned out to be unusable under Proton regardless (see MCPHttpServer's class
+                // comment for the measured reason).
+                _httpServer = new MCPHttpServer(_server, port, GetConfiguredPath());
+                _httpServer.Start();
 
-                LoggerInstance.Msg($"MelonMCP Server started on port {port}");
-                LoggerInstance.Msg($"Connect your MCP client to: tcp://localhost:{port}");
+                LoggerInstance.Msg($"MelonMCP HTTP server started on port {port}");
+                LoggerInstance.Msg($"Connect your MCP client to: {_httpServer.EndpointUrl}");
             }
             catch (Exception ex)
             {
@@ -97,6 +113,8 @@ namespace MelonMCP
 
                 // Do not leave a half-built server behind: if the port was already bound (e.g. a
                 // previous instance was not torn down), the listener may exist but never accept.
+                try { _httpServer?.Stop(); } catch { }
+                _httpServer = null;
                 try { _server?.Stop(); } catch { }
                 _server = null;
             }
@@ -156,9 +174,13 @@ namespace MelonMCP
                 return;
             }
 
-            // Release the listening socket first: this is what unblocks a hot reload.
+            // Release the listening socket first: this is what unblocks a hot reload. The HTTP
+            // transport must be stopped before the server object is dropped, because its accept loop
+            // holds a reference to it.
             try
             {
+                _httpServer?.Stop();
+                _httpServer = null;
                 _server?.Stop();
             }
             catch (Exception ex)
@@ -218,8 +240,19 @@ namespace MelonMCP
 
         private int GetConfiguredPort()
         {
-            // Could be made configurable via MelonPreferences
             return 27015; // Default port
+        }
+
+        /// <summary>
+        /// The HTTP path the MCP endpoint is served on.
+        ///
+        /// "/mcp" is what MCP clients expect by convention, and what the Streamable HTTP examples
+        /// use. Kept as a method rather than inlined so it is obvious where to change it if a
+        /// deployment needs a different path.
+        /// </summary>
+        private string GetConfiguredPath()
+        {
+            return "/mcp";
         }
 
         private void RegisterTools()
@@ -510,6 +543,8 @@ namespace MelonMCP
                 return;
             }
 
+            _httpServer?.Stop();
+            _httpServer = null;
             _server?.Stop();
             LoggerInstance?.Msg("MelonMCP Server stopped");
         }

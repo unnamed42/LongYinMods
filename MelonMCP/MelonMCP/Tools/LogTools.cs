@@ -12,19 +12,14 @@ namespace MelonMCP.Tools
     public class ReadLogsToolDefinition : ToolDefinitionBase
     {
         public override string Name => "read_logs";
-        public override string Description => @"Read recent MelonLoader log messages - console output, errors, warnings and messages from mods.
+        public override string Description => @"Read recent MelonLoader log lines from an in-memory buffer.
 
-Two modes:
-- default: return the matching lines.
-- group_by='prefix': return counted GROUPS ordered by frequency, for when the question is 'which
-  message is flooding the log' rather than 'what does the log say'. A plain 'filter' cannot answer
-  that: it returns matching lines one by one, so a message logged 32 times looks the same as 32
-  distinct messages. Groups are keyed on the leading [tag], with embedded sequence numbers
-  normalised away so repeated calls collapse together.
+The buffer only holds what was captured after this mod loaded, so absent messages here were not
+necessarily never logged - the MelonLoader log file has the complete record.
 
-Note on the buffer: it only holds what MelonMCP could subscribe to. In this MelonLoader build the
-Msg channel fails to bind, so WARNING and ERROR are captured reliably while plain Msg lines may be
-missing. Absence of a message here does not prove it was never logged.";
+group_by='prefix' counts messages by leading tag instead of listing them, which answers 'which
+message is flooding the log'. A plain filter cannot: it returns matches one by one, so a message
+logged 32 times looks like 32 distinct messages.";
         public override bool RequiresMainThread => false;
 
         protected override ToolInputSchema GetInputSchema()
@@ -218,18 +213,12 @@ missing. Absence of a message here does not prove it was never logged.";
     {
         public override string Name => "main_thread_status";
 
-        public override string Description => @"Check whether the Unity main thread is still running.
+        public override string Description => @"Report whether the Unity main thread is still completing frames.
 
-Reports the game's frame counter, how much it advanced during the probe, and a verdict:
-- running       : frames are completing; main-thread tools will work.
-- stuck         : ZERO frames during the probe. Main-thread tools (find_objects_of_type,
-                  evaluate_expression, execute_csharp, watch_field, get_game_info, ...) will fail
-                  until it recovers. Use the main-thread-free tools instead and inspect the process
-                  from the OS.
-- no-frames-yet : no frame has been observed at all; the game is likely still starting up.
-
-Call this FIRST whenever a main-thread tool times out. It never touches Unity, so it still answers
-when nothing else will.";
+Every tool that touches a Unity object is queued onto the main thread, so when this reports 'stuck'
+those tools will all time out. The tools that keep working are the ones that never touch Unity:
+read_logs, list_patches, hook_patch_info, list_assemblies and the config tools. Use them, and the
+native hint in the result, to diagnose from outside.";
 
         // The whole point: this must work while the main thread is wedged.
         public override bool RequiresMainThread => false;

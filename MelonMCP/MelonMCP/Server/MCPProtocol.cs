@@ -14,7 +14,44 @@ namespace MelonMCP.Server
     public static class MCPProtocol
     {
         public const string JSONRPC_VERSION = "2.0";
-        public const string MCP_VERSION = "2024-11-05";
+
+        /// <summary>
+        /// Protocol revisions this server actually implements.
+        ///
+        /// DELIBERATELY SHORT, and that is the point. The Streamable HTTP revision history is:
+        ///   2024-11-05  HTTP+SSE transport; no protocol-level sessions
+        ///   2025-03-26  Streamable HTTP; sessions introduced, GET stream optional
+        ///   2025-06-18  sessions become OPTIONAL; MCP-Protocol-Version header validation required
+        ///   2025-11-25  further refinements
+        ///   2026-07-28  sessions and GET stream REMOVED; header/body mirroring contract
+        ///
+        /// This server is stateless, sends no session id, and answers 405 to GET - i.e. it satisfies
+        /// the 2025-03-26 rules and everything before them. It does NOT implement the 2025-06-18+
+        /// header-mirroring contract, so it does not claim those revisions. Declaring a version
+        /// without implementing its rules is a lie whose cost lands on the CLIENT side, where it is
+        /// very hard to diagnose; the spec provides a clean "unsupported" path instead.
+        ///
+        /// 2026-07-28 in particular is refused on purpose: it REQUIRES validating that the
+        /// MCP-Protocol-Version header matches the version inside the message body, answering 400
+        /// HeaderMismatch otherwise. Not implemented here, so not advertised.
+        /// </summary>
+        public static readonly string[] SupportedProtocolVersions =
+        {
+            "2025-03-26",
+            "2024-11-05",
+        };
+
+        /// <summary>The newest revision this server speaks; also the fallback default.</summary>
+        public const string MCP_VERSION = "2025-03-26";
+
+        /// <summary>
+        /// Version assumed for a request carrying no `MCP-Protocol-Version` header.
+        ///
+        /// The spec permits (does not require) this, because clients written before 2025-06-18 never
+        /// sent the header. Using the same value as our newest revision keeps the no-header and
+        /// has-header paths identical, so there is only one path to reason about.
+        /// </summary>
+        public const string LegacyVersionWithoutHeader = "2025-03-26";
 
         public static JsonSerializerSettings JsonSettings { get; } = new JsonSerializerSettings
         {

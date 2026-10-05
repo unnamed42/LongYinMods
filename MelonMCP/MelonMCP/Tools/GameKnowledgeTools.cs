@@ -221,25 +221,14 @@ namespace MelonMCP.Tools
     public class AddGameKnowledgeToolDefinition : ToolDefinitionBase
     {
         public override string Name => "add_game_knowledge";
-        public override string Description => @"Record knowledge about the GAME ITSELF - its world, setting,
- lore, rules, characters, items, factions, numeric systems and mechanics. This is for things that are
-true about the game as a product, independent of any mod.
+        public override string Description => @"Record knowledge about the GAME ITSELF - world, lore, rules, characters, items, factions,
+mechanics - i.e. things true of the game as a product, independent of any mod.
 
-*** DO NOT STORE MOD-DEVELOPMENT KNOWLEDGE HERE. ***
-Not tool usage, not build recipes, not decompilation workflow, not gotchas, not native addresses,
-not field offsets, not call-chain conclusions, not patch designs. Those do NOT belong in this store:
-  - general tooling / build / API knowledge  -> the repository's AGENTS.md
-  - game-specific addresses, offsets, call chains, measured behaviour -> the repo's docs/<project>.md
+DO NOT store mod-development knowledge here: no tool usage, build recipes, decompilation workflow,
+gotchas, addresses, offsets or patch designs. Tooling goes in AGENTS.md, game-specific measured
+behaviour in docs/<project>.md.
 
-Why it matters: this file lives at <game>/UserData/MelonMCP/game_knowledge.json - inside the GAME
-directory, not in any repository. It is not version-controlled, does not travel with the project, and
-is lost on a reinstall / verify / machine change. Other agents reading AGENTS.md or docs/ cannot see
-it. It survives across MCP sessions on ONE machine; it is NOT a substitute for repo documentation.
-
-Example of what belongs here: 'Faction X is hostile to Y', 'item Z restores N stamina',
-'the in-game date advances one year per season'.
-
-Persists across MCP sessions for the current game.";
+This lives in the GAME directory, unversioned and lost on reinstall, and other agents cannot see it.";
 
         /// <summary>
         /// Reminder surfaced in the schema too, because the description alone is easy to skim past.
@@ -334,15 +323,11 @@ Persists across MCP sessions for the current game.";
     public class GetGameKnowledgeToolDefinition : ToolDefinitionBase
     {
         public override string Name => "get_game_knowledge";
-        public override string Description => @"Query the stored knowledge about the GAME ITSELF - its world,
- setting, lore, rules, characters, items, factions and mechanics.
+        public override string Description => @"Query the knowledge recorded about the GAME ITSELF - world, lore, rules, characters, items,
+factions, mechanics.
 
-Scope note: this store deliberately holds NO mod-development knowledge. Tooling, build recipes,
-decompilation workflow, gotchas, native addresses, field offsets, call chains and patch designs live
-in the repository's AGENTS.md and docs/<project>.md instead. If you are looking for those, read the
-repo - do not expect to find them here.
-
-Can retrieve everything for the current game, one category, or filter by tags.";
+Holds no mod-development knowledge by design: tooling, build recipes and decompilation notes live in
+the repository's AGENTS.md and docs/<project>.md. Look there for those.";
 
         public override bool RequiresMainThread => false;
 

@@ -42,33 +42,14 @@ namespace MelonMCP.Tools
         // Dereferences live Unity objects, so it must run on the main thread.
         public override bool RequiresMainThread => true;
 
-        public override string Description => @"Read named fields across instances of a type, in one call.
+        public override string Description => @"Read named fields across live instances of a type in one call,
+instead of hand-writing a FindObjectsOfTypeAll loop.
 
-Use this instead of hand-writing a foreach over Resources.FindObjectsOfTypeAll every time you need
-to see current field values on live objects.
+fields are dot paths evaluated segment by segment. A segment that is null or throws renders only
+that cell as <err:...>; the rest still returns, so partial output is normal.
 
-REQUIRED: typeName. RECOMMENDED: fields (dot paths into nested objects).
-
-Fields are dot-separated paths evaluated one segment at a time, e.g.
-  'buildingData.buildingID'  reads obj.buildingData, then .buildingID on it.
-If a segment is null or throws, THAT CELL renders as <err:...> and everything else still returns -
-a failure never aborts the batch. Omit 'fields' to just count instances.
-
-Examples:
-  inspect_unity_object(typeName='AreaBuildingIconController',
-                       fields=['buildingData.buildingID', 'buildingData.lv'],
-                       where='buildingData.buildingID=-1')
-  inspect_unity_object(typeName='AreaUnitController', count=5)
-
-NOTES
-- Instances come from Resources.FindObjectsOfTypeAll, which includes inactive objects and objects in
-  other scenes, so counts run higher than what is visible on screen.
-- 'count' is capped (default 20) because these types are numerous: AreaUnitController and
-  AreaBuildingIconController were measured at 226 and 114 instances respectively, and an unbounded
-  dump buries the answer.
-- 'where' matches on the string form of the field, so it works for numbers, enums and booleans alike.
-- Field and property names are resolved by reflection on the ACTUAL instance type, walking base
-  types, so inherited members work.";
+Instances come from Resources.FindObjectsOfTypeAll, so the count INCLUDES inactive objects and other
+scenes, i.e. more than is on screen.";
 
         protected override ToolInputSchema GetInputSchema()
         {

@@ -24,17 +24,14 @@ namespace MelonMCP.Tools
     {
         public override string Name => "watch_field";
 
-        public override string Description => @"Poll a field every N frames and record every observed change.
+        public override string Description => @"Poll a field or property every N frames and record every observed change, turning 'this value is
+wrong and I do not know who changed it' into a timeline of (frame, old, new).
 
-Turns 'this field holds the wrong value and I do not know who changed it' into a timeline of
-(frame, oldValue, newValue). Sampling is per-frame by default.
+Call again with the returned watchId to read what accumulated, or unwatch_field to stop. Changes
+accumulate between calls, so you can trigger an action then poll.
 
-Pass typeName + fieldName to start a watch; it returns a watchId. Call again with that watchId to read
-the accumulated changes, or use unwatch_field to stop. Changes accumulate between calls, so you can
-trigger an in-game action and then poll for what moved.
-
-LIMITATION: this samples, so a value written and restored between two samples is missed. It also
-cannot tell you WHICH code performed the write - only when the value changed.";
+Samples, so a value written and restored between samples is missed, and it reports when a value
+changed - never which code changed it.";
 
         protected override ToolInputSchema GetInputSchema()
         {

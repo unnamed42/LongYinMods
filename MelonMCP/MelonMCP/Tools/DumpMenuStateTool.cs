@@ -33,25 +33,14 @@ namespace MelonMCP.Tools
     {
         public override string Name => "dump_menu_state";
 
-        public override string Description => @"List UI buttons and their enabled / interactable / activeInHierarchy
-flags - the three that together decide whether a button is actually usable.
+        public override string Description => @"List UI buttons with their enabled / interactable / activeInHierarchy flags - read all three
+together, since a button that looks present can still be a dead leftover.
 
-Use this instead of hand-writing a FindObjectsOfType<Button> + GetComponentsInChildren<Text> loop
-every time you need to know what is clickable. A button that looks present can still be a leftover:
-in this game, a stale action button is identified by enabled=false while interactable and
-activeInHierarchy both stay true, so reading only the obvious flag gives the wrong answer.
+Gathered in one pass, because menus rebuilt inside the game's Update would otherwise change between
+two reads and look like a data problem.
 
-Everything is gathered IN ONE PASS before anything is returned. Menus whose content is rebuilt
-inside the game's Update would otherwise change between two separate reads, producing output that
-looks like a data problem but is a timing one (observed: four buttons, then one).
-
-INSTANCE SOURCE - the difference is 100x, so choose deliberately:
-- includeInactive=false (default): only objects in active scenes. Measured 9 buttons in the main menu.
-- includeInactive=true: adds inactive objects and other loaded scenes. Measured 951, of which 942 are
-  not on screen (pooled/prefab/other scenes). Useful for finding a template, useless as a menu dump.
-
-'rootPath' narrows the search to one GameObject's descendants, which is what you usually want when a
-specific panel is open - it avoids every other scene's buttons.";
+includeInactive changes the result by ~100x (9 buttons on screen vs 951 total, most pooled or in
+other scenes).";
 
         public override bool RequiresMainThread => true;
 

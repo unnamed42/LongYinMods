@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -30,17 +31,10 @@ namespace MelonMCP.Server
         private const int MainThreadToolTimeoutSeconds = 3;
 
         private readonly int _port;
-        private TcpListener _listener;
-        private CancellationTokenSource _cancellation;
-        private readonly ConcurrentDictionary<Guid, MCPClientHandler> _clients = new ConcurrentDictionary<Guid, MCPClientHandler>();
-        private readonly Dictionary<string, IToolDefinition> _tools = new Dictionary<string, IToolDefinition>(StringComparer.OrdinalIgnoreCase);
-        /// <summary>The background accept loop, tracked so Stop() can wait for it to unwind.</summary>
-        private Task _acceptLoop;
 
-        private bool _isRunning;
+        private readonly Dictionary<string, IToolDefinition> _tools = new Dictionary<string, IToolDefinition>(StringComparer.OrdinalIgnoreCase);
 
         public int ToolCount => _tools.Count;
-        public bool IsRunning => _isRunning;
 
         public MCPServer(int port)
         {
@@ -53,117 +47,31 @@ namespace MelonMCP.Server
             MelonMCPPlugin.Logger?.Msg($"Registered tool: {tool.Name}");
         }
 
-        public void Start()
-        {
-            if (_isRunning) return;
-
-            _cancellation = new CancellationTokenSource();
-            _listener = new TcpListener(IPAddress.Loopback, _port);
-            _listener.Start();
-            _isRunning = true;
-
-            // Start accepting clients in background
-            _acceptLoop = Task.Run(AcceptClientsAsync);
-        }
-
         public void Stop()
         {
-            if (!_isRunning) return;
-
-            _isRunning = false;
-            _cancellation?.Cancel();
-
-            // Disconnect all clients
-            foreach (var client in _clients.Values)
-            {
-                client.Disconnect();
-            }
-            _clients.Clear();
-
-            // Capture the listener in a local and give the accept loop its own reference to it.
-            // AcceptClientsAsync reads _listener on every iteration, so nulling the field while the
-            // loop is still parked in AcceptTcpClientAsync turns the expected ObjectDisposedException
-            // into a NullReferenceException and skips the clean break.
-            var listener = _listener;
-            _listener = null;
-
-            try
-            {
-                listener?.Stop();
-            }
-            catch { }
-
-            // Wait for the accept loop to observe the shutdown. This is what actually makes the port
-            // reusable: on a hot reload, MelonLoader loads the new assembly as soon as
-            // OnDeinitializeMelon returns, and if the old listener socket is still held the new
-            // Start() throws at TcpListener.Start() with 'address already in use'.
-            var loop = _acceptLoop;
-            _acceptLoop = null;
-            if (loop != null)
-            {
-                try
-                {
-                    loop.Wait(TimeSpan.FromSeconds(5));
-                }
-                catch (Exception ex)
-                {
-                    MelonMCPPlugin.Logger?.Warning($"Accept loop did not shut down cleanly: {ex.Message}");
-                }
-            }
-
-            _cancellation?.Dispose();
-            _cancellation = null;
+            // Nothing to release here: this class owns no socket. The transport that does own one is
+            // MCPHttpServer, and the plugin stops it first. Kept as a method because the plugin's
+            // teardown calls it and a future transport will want the same hook.
         }
 
-        private async Task AcceptClientsAsync()
-        {
-            // Take a local reference to the listener: Stop() nulls the field before the loop is
-            // guaranteed to have observed the cancellation, and we want the ObjectDisposedException
-            // path below, not a NullReferenceException.
-            var listener = _listener;
-
-            while (_isRunning && _cancellation != null && !_cancellation.Token.IsCancellationRequested)
-            {
-                try
-                {
-                    var client = await listener.AcceptTcpClientAsync();
-                    var clientId = Guid.NewGuid();
-                    var handler = new MCPClientHandler(clientId, client, this);
-                    _clients[clientId] = handler;
-
-                    MelonMCPPlugin.Logger?.Msg($"Client connected: {clientId}");
-
-                    // Handle client in background
-                    _ = Task.Run(() => handler.HandleClientAsync(_cancellation.Token));
-                }
-                catch (ObjectDisposedException)
-                {
-                    // Server stopped
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    if (_isRunning)
-                    {
-                        MelonMCPPlugin.Logger?.Warning($"Error accepting client: {ex.Message}");
-                    }
-                }
-            }
-        }
-
-        internal void OnClientDisconnected(Guid clientId)
-        {
-            _clients.TryRemove(clientId, out _);
-            MelonMCPPlugin.Logger?.Msg($"Client disconnected: {clientId}");
-        }
-
-        internal JsonRpcResponse HandleRequest(JsonRpcRequest request)
+        /// <summary>
+        /// Dispatches one JSON-RPC request.
+        ///
+        /// <paramref name="protocolVersion"/> is the revision the TRANSPORT negotiated for this
+        /// request, or null when the transport has no opinion. It is passed as an argument rather
+        /// than stored on the server because HTTP handles requests concurrently: a field would mean
+        /// two overlapping `initialize` calls could each write it and then read the other's value,
+        /// answering with a version the client never asked for. Passing it keeps the server
+        /// stateless with respect to the transport, which is also what lets both transports share
+        /// this method safely.
+        /// </summary>
+        internal JsonRpcResponse HandleRequest(JsonRpcRequest request, string protocolVersion = null)
         {
             try
             {
                 return request.Method switch
                 {
-                    "initialize" => HandleInitialize(request),
+                    "initialize" => HandleInitialize(request, protocolVersion),
                     "initialized" => HandleInitialized(request),
                     "ping" => HandlePing(request),
                     "tools/list" => HandleListTools(request),
@@ -188,11 +96,48 @@ namespace MelonMCP.Server
             }
         }
 
-        private JsonRpcResponse HandleInitialize(JsonRpcRequest request)
+        /// <summary>
+        /// Chooses the version to answer `initialize` with, in order of preference:
+        ///
+        ///   1. the transport-negotiated version (HTTP: the validated header);
+        ///   2. otherwise the version the CLIENT proposed in params.protocolVersion, IF this server
+        ///      supports it;
+        ///   3. otherwise this server's newest supported revision.
+        ///
+        /// Step 2 checks SUPPORT rather than echoing blindly. Echoing an arbitrary client value would
+        /// be a lie the client discovers later, when it relies on a behaviour this server does not
+        /// have - and that failure surfaces as a tool bug, not a version mismatch.
+        ///
+        /// This matters more over HTTP than it did over TCP: an HTTP client validates the echoed
+        /// version and may drop the connection when it does not match what it asked for. The previous
+        /// hardcoded echo worked only because the bridge in between did not check.
+        /// </summary>
+        private static string ResolveNegotiatedVersion(JsonRpcRequest request, string transportVersion)
+        {
+            if (!string.IsNullOrEmpty(transportVersion)) return transportVersion;
+
+            try
+            {
+                var proposed = request.Params?["protocolVersion"]?.ToString();
+                if (!string.IsNullOrEmpty(proposed)
+                    && MCPProtocol.SupportedProtocolVersions.Contains(proposed, StringComparer.Ordinal))
+                {
+                    return proposed;
+                }
+            }
+            catch
+            {
+                // A malformed params object must not turn a version echo into a failed initialize.
+            }
+
+            return MCPProtocol.MCP_VERSION;
+        }
+
+        private JsonRpcResponse HandleInitialize(JsonRpcRequest request, string transportVersion)
         {
             var result = new InitializeResult
             {
-                ProtocolVersion = MCPProtocol.MCP_VERSION,
+                ProtocolVersion = ResolveNegotiatedVersion(request, transportVersion),
                 Capabilities = new ServerCapabilities
                 {
                     Tools = new ToolsCapability { ListChanged = false },
@@ -488,96 +433,6 @@ namespace MelonMCP.Server
             }
 
             return new JsonRpcResponse { Id = request.Id, Result = result };
-        }
-    }
-
-    /// <summary>
-    /// Handles individual MCP client connections
-    /// </summary>
-    internal class MCPClientHandler
-    {
-        private readonly Guid _clientId;
-        private readonly TcpClient _client;
-        private readonly MCPServer _server;
-        private NetworkStream _stream;
-
-        public MCPClientHandler(Guid clientId, TcpClient client, MCPServer server)
-        {
-            _clientId = clientId;
-            _client = client;
-            _server = server;
-        }
-
-        public async Task HandleClientAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                _stream = _client.GetStream();
-                using var reader = new StreamReader(_stream, Encoding.UTF8, leaveOpen: true);
-
-                while (!cancellationToken.IsCancellationRequested && _client.Connected)
-                {
-                    // Read line (JSON-RPC messages are newline-delimited)
-                    var line = await reader.ReadLineAsync();
-                    if (line == null) break; // Connection closed
-
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-
-                    try
-                    {
-                        var request = JsonConvert.DeserializeObject<JsonRpcRequest>(line, MCPProtocol.JsonSettings);
-                        var response = _server.HandleRequest(request);
-
-                        if (response != null)
-                        {
-                            await SendResponseAsync(response);
-                        }
-                    }
-                    catch (JsonException ex)
-                    {
-                        var errorResponse = new JsonRpcResponse
-                        {
-                            Id = null,
-                            Error = JsonRpcError.ParseError($"Invalid JSON: {ex.Message}")
-                        };
-                        await SendResponseAsync(errorResponse);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                MelonMCPPlugin.Logger?.Warning($"Client handler error: {ex.Message}");
-            }
-            finally
-            {
-                Disconnect();
-                _server.OnClientDisconnected(_clientId);
-            }
-        }
-
-        private async Task SendResponseAsync(JsonRpcResponse response)
-        {
-            try
-            {
-                var json = JsonConvert.SerializeObject(response, MCPProtocol.JsonSettings);
-                var bytes = Encoding.UTF8.GetBytes(json + "\n");
-                await _stream.WriteAsync(bytes, 0, bytes.Length);
-                await _stream.FlushAsync();
-            }
-            catch (Exception ex)
-            {
-                MelonMCPPlugin.Logger?.Warning($"Failed to send response: {ex.Message}");
-            }
-        }
-
-        public void Disconnect()
-        {
-            try
-            {
-                _stream?.Close();
-                _client?.Close();
-            }
-            catch { }
         }
     }
 }
