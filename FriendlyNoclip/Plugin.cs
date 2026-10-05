@@ -82,30 +82,7 @@ public class Plugin : MelonMod
     /// <summary>原生 detour：允许穿越**己方城墙**。</summary>
     internal static MelonPreferences_Entry<bool> WallPassEnabled = null!;
 
-    /// <summary><see cref="WallPassHook"/>（改 <c>Navigate</c> 里的障碍判定）。</summary>
-    internal static MelonPreferences_Entry<bool> WallPassHookEnabled = null!;
 
-    /// <summary>
-    /// <see cref="WallHighlightHook"/>（改 <c>GetMoveRangeGrids</c> 里的两处障碍判定）。
-    /// <b>默认 false</b>：已实测会崩溃且非功能所需，详见它注册处的注释。
-    /// </summary>
-    internal static MelonPreferences_Entry<bool> WallHighlightHookEnabled = null!;
-
-
-    /// <summary>
-    /// 「城墙不可停留」：拦下把城墙格当作**落点**的移动请求。
-    ///
-    /// <para>
-    /// 【为什么需要单独一个开关】<see cref="WallPassEnabled"/> 写 <c>passes</c> 之后，
-    /// 城墙从「完全不可通行」变成了「**完全可通行**」—— 而我们要的是
-    /// 「可跨越、**不可停留**」。<c>passes</c> 是类别标志，一刀切，
-    /// 它同时驱动了「能不能过」与「能不能停」两件事，无法只改一半。
-    /// </para>
-    /// </summary>
-    internal static MelonPreferences_Entry<bool> WallNoStop = null!;
-
-    /// <summary>「穿越不留痕」开关：写回被穿越踩掉的原主登记。</summary>
-    internal static MelonPreferences_Entry<bool> FixOccupancy = null!;
 
     private HarmonyLib.Harmony? _harmony;
 
@@ -172,7 +149,12 @@ public class Plugin : MelonMod
 
         Category = MelonPreferences.CreateCategory(CategoryId, CategoryDisplay);
 
-        // 两个功能性开关（native_detour / fix_occupancy）+ 一个诊断开关。
+        // ★ 面向用户只有两个功能开关（穿友方 / 穿城墙）+ 两个调试开关。
+        //
+        //   曾经有 9 个，其中 4 个是「配套实现」：
+        //     fix_occupancy / wall_pass_hook / wall_no_stop / wall_highlight_hook
+        //   前三个已合并进各自的功能开关，最后一个已删除。
+        //   理由见下方各自的注册处，以及 docs/friendlynoclip.md §2.1。
 
         Diagnostics = Category.CreateEntry(
             "diagnostics", false,
@@ -188,71 +170,29 @@ public class Plugin : MelonMod
         // 只把**敌方**单位当阻挡，友方可以穿过。
         NativeDetourEnabled = Category.CreateEntry(
             "native_detour", true,
-            "原生 detour（只穿友方）",
-            "在 MapNavigator.Navigate 内装 detour：友方格子可通过，敌方仍然阻挡。");
+            "穿越友方单位",
+            "友方单位所在格可以路过（敌方仍然阻挡）。" +
+            "包含配套的「穿越不留痕」修复 —— 不让被穿过的单位失去反应、" +
+            "也不让同一个格子站上两个人。关闭后穿不过友方。");
 
         // 原生 detour：城防。独立 hook 点 —— 城墙在「存活单位」判定之前就被排除了。
+        // ★ 城墙功能是**一个整体**，只留这一个开关。
+        //
+        //   合并进来的配套项（曾经各有独立开关，现已内置）：
+        //     · wall_pass_hook   —— 已被 passes 方案覆盖，关掉不影响功能
+        //     · wall_no_stop     —— 「不可停留」是「可跨越」的必要配套
+        //       （没有它，AI 会站到城墙上，见 §2.2d）
+        //
+        //   为什么合并：配套功能**不应该能单独生效**。分开时用户可以配出
+        //   「能穿但能站上去」这种**坏状态**（正是用户实测到的 AI 站墙）。
+        //   收成一个开关后，这种错误配置在结构上就不存在了。
         WallPassEnabled = Category.CreateEntry(
             "wall_pass", true,
             "穿越己方城墙",
-            "允许穿越属于自己队伍的城墙（ObstacleType.Wall 且 teamID == selfTeamID）。" +
-            "守方 AI 自动获得同样能力；中立障碍与他方城墙不受影响。");
+            "允许跨越属于自己队伍的城墙（可跨越、不可停留）。" +
+            "守方 AI 自动获得同样能力；中立障碍与他方城墙不受影响。" +
+            "关闭后穿不过己方城墙。");
 
-        // ★ 二分结论（2026-10-04，已实机确认）：
-        //
-        //   ① GenerateMapObjs Postfix（写 passes）   —— 纯数据，安全
-        //   ② BattleRealEnd   Postfix（恢复 passes） —— 纯数据，安全
-        //   ③ WallPassHook（改 Navigate）            —— 需要，安全
-        //   ④ WallHighlightHook（改 GetMoveRangeGrids）—— ★ 会崩溃，默认关
-        //
-        // 验证过程：
-        //   两轮二分：合并开关=false -> 不崩；
-        //   再 wall_pass_hook=true + wall_highlight_hook=false -> 不崩，
-        //   且**城墙穿越已经可用**。
-        //
-        // => 高亮 hook 既会崩溃、又**不是功能所必需的**（passes 已经让
-        //    Navigate 能穿墙，而墙对面格子本来就由游戏自己的
-        //    GetMoveRangeGrids 调 Navigate 决定亮不亮）。
-
-        WallPassHookEnabled = Category.CreateEntry(
-            "wall_pass_hook", true,
-            "城防 detour（WallPassHook）",
-            "改 Navigate 里的障碍格判定。关闭后不影响其它功能。");
-
-        WallNoStop = Category.CreateEntry(
-            "wall_no_stop", true,
-            "城墙不可停留（WallNoStopPatch）",
-            "拦下把城墙格当作落点的移动请求 —— 城墙可跨越，但不得停留。" +
-            "关闭后 AI 会站到城墙上。");
-
-    /// <summary>
-    /// <see cref="WallHighlightHook"/>（改 <c>GetMoveRangeGrids</c> 里的两处障碍判定）。
-    ///
-    /// <para><b>默认 false</b>，两个原因：</para>
-    /// <list type="number">
-    ///   <item><b>它会崩溃</b>：实机二分确认，开着它打完一场必崩（FailFast）；
-    ///     而且 dump 显示崩溃帧紧跟 <c>call GetMoveRangeGrids</c> 之后 ——
-    ///     与它装的两个 detour 完全对应。</item>
-    ///   <item><b>它并不需要</b>：关掉之后**城墙穿越仍然正常可用**。
-    ///     因为 <c>passes</c> 已让 <c>Navigate</c> 能穿墙，而墙对面格子亮不亮
-    ///     本来就由游戏自己的 <c>GetMoveRangeGrids</c> 调 <c>Navigate</c> 决定。</item>
-    /// </list>
-    /// <para>
-    /// 保留代码与开关：若将来想让城墙格本身也亮（当前语义是「不可停留」），
-    /// 可以再研究一个不崩溃的做法。
-    /// </para>
-    /// </summary>
-    WallHighlightHookEnabled = Category.CreateEntry(
-        "wall_highlight_hook", false,
-        "高亮 detour（WallHighlightHook）【实验性，会崩溃】",
-        "改 GetMoveRangeGrids 里的两处障碍格判定。" +
-        "已验证会崩溃且非功能所需，默认关闭。");
-        // ★ 「穿越不留痕」的探测点：EnterGrid 是 6 个调用点的唯一汇聚处，
-        //   且同时拿到 unit 与 targetGrid —— 判定「这是穿越」所需的全部信息都在这里。
-        FixOccupancy = Category.CreateEntry(
-            "fix_occupancy", true,
-            "穿越不留痕（写回原主登记）",
-            "路过友方格子后把被覆盖的原主登记写回。");
         _harmony = new HarmonyLib.Harmony(HarmonyId);
 
         // 两个原生 detour，各自独立开关。都在 MapNavigator.Navigate 内，但 hook 点不同：
@@ -263,41 +203,21 @@ public class Plugin : MelonMod
             FriendlyPassHook.Instance.Install();
         }
 
-        // ★★ 城防相关的两个原生 detour，各自独立开关。
+        // ★★ 城防：`wall_pass` **一个开关管全部**（跨越 + 禁停 + 必要的 detour）。
         //
-        // 二分结论（已实机确认）：
-        //   wall_highlight_hook=false 时**不崩**，且城墙穿越正常；
-        //   开着它则打完一场必崩（FailFast，dump 帧紧跟
-        //   `call GetMoveRangeGrids` 之后）。
-        // => 高亮 hook 默认关（见它注册处的注释）。
-        bool passHookOn = WallPassEnabled.Value && WallPassHookEnabled.Value;
-        bool highlightHookOn = WallPassEnabled.Value && WallHighlightHookEnabled.Value;
-
-        if (passHookOn)
+        //   合并进来的配套项（曾经各有独立开关，见 docs/friendlynoclip.md）：
+        //     · wall_pass_hook   —— 已被 passes 方案覆盖，关掉不影响功能
+        //     · wall_no_stop     —— 「不可停留」是「可跨越」的必要配套：
+        //         没有它，passes 会把城墙变成「完全可通行」，AI 会站上去（§2.2d）
+        //     · wall_highlight_hook —— 经验证会崩溃且非功能所需，**已删除**
+        //
+        //   为什么合并成一个：配套功能**不应该能单独生效**。分开时用户可以
+        //   配出「能穿但能站上去」这种坏状态 —— 那正是用户实测到的 AI 站墙。
+        if (WallPassEnabled.Value)
         {
+            // 原生 detour：改 Navigate 里的障碍格判定。
             WallPassHook.Instance.Install();
         }
-
-        if (highlightHookOn)
-        {
-            // ★ 高亮侧：GetMoveRangeGrids 有**两套独立的**障碍格判定，
-            //   与 Navigate 那套互不相干。只 hook Navigate 时，城墙格
-            //   明明可达（Navigate 返回 true）却永远不亮。
-            WallHighlightHook.Instance.Install();
-            WallHighlightHook.Instance.InstallSecondGate();
-        }
-
-        if (WallPassEnabled.Value && !passHookOn && !highlightHookOn)
-        {
-            LoggerInstance.Msg(
-                "[城防] 两个原生 detour 均已关闭：仅保留 passes 数据写入（二分定位模式）。");
-        }
-        else if (WallPassEnabled.Value)
-        {
-            LoggerInstance.Msg(
-                $"[城防] detour 开关：城防={passHookOn}，高亮={highlightHookOn}。");
-        }
-
 
         int patched = 0;
         patched += TryPatch(
@@ -442,7 +362,7 @@ public class Plugin : MelonMod
             $"FriendlyNoclip 初始化完成：挂载 {patched} 个补丁" +
             $"，穿友方 detour={(FriendlyPassHook.Instance.Installed ? "已启用" : "未启用")}" +
             $"，穿己墙 detour={(WallPassHook.Instance.Installed ? "已启用" : "未启用")}" +
-            $"，高亮 detour={(WallHighlightHook.Instance.Installed ? "已启用" : "未启用")}" +
+
             $"，城门放行钩子 {(WallPassEnabled.Value ? "已注册" : "未注册")}。" +
             $"【构建 {buildInfo}】");
     }
@@ -711,6 +631,11 @@ public class Plugin : MelonMod
         return null;
     }
 
+    // =================================================================
+    // 【功能 A】穿友方（native_detour）
+    //   EnterGrid 拦「停在别人格上」；OnLeave Postfix 写回被踩掉的登记
+    // =================================================================
+
     /// <summary>
     /// `GridUnitData.OnLeave()` 的 Prefix —— 记录"谁把某格的 battleUnit 清成 null"。
     ///
@@ -783,7 +708,7 @@ public class Plugin : MelonMod
     {
         try
         {
-            if (__instance == null || !FixOccupancy.Value)
+            if (__instance == null || !NativeDetourEnabled.Value)
             {
                 return;
             }
@@ -852,7 +777,7 @@ public class Plugin : MelonMod
         //    交给协程驱动 → 极可能崩。所以不能钩那里。）
         //
         // 拦截后「什么都不做」：不替游戏改写意图，等价于该格不可达。
-        if (WallNoStop.Value && WallPassEnabled.Value && ShouldBlockWallStep(grid))
+        if (WallPassEnabled.Value && ShouldBlockWallStep(grid))
         {
             LogInfo(() =>
                 $"[城墙禁停] 拦下进入（{SafeRow(grid)},{SafeCol(grid)}）：城墙可跨越，但不得停留。");
@@ -879,7 +804,7 @@ public class Plugin : MelonMod
         //
         // ⚠️ 只拦「别人」：自己走进自己当前所在的格子必须放行，
         //   否则单位会被自家登记卡住。
-        if (FixOccupancy.Value && IsBlockedByOccupant(__instance, grid))
+        if (NativeDetourEnabled.Value && IsBlockedByOccupant(__instance, grid))
         {
             LogInfo(() =>
                 $"[禁停占用格] 拦下进入（{SafeRow(grid)},{SafeCol(grid)}）：" +
@@ -963,7 +888,7 @@ public class Plugin : MelonMod
                     isTraversal = occupant.Pointer != __instance.Pointer;
 
                     // 记下「即将被覆盖的原主」，交给紧随其后的 OnLeave 写回。
-                    if (isTraversal && FixOccupancy.Value)
+                    if (isTraversal && NativeDetourEnabled.Value)
                     {
                         RecordPendingRepair(
                             grid, occupant, __instance, row, col);
@@ -1091,7 +1016,7 @@ public class Plugin : MelonMod
 
     /// <summary>
     /// 记下即将被穿越覆盖的原主，等下一次 <c>OnLeave</c> 把它写回。
-    /// 只在 <see cref="FixOccupancy"/> 开启时被调用。
+    /// 只在 <see cref="NativeDetourEnabled"/> 开启时被调用。
     /// </summary>
     private static void RecordPendingRepair(
         GridUnitData grid,
@@ -1520,6 +1445,11 @@ public class Plugin : MelonMod
     // ------------------------------------------------------------------
     // 探针 1：GetMoveRangeGrids Postfix
     // ------------------------------------------------------------------
+
+    // =================================================================
+    // 【功能 B】穿城墙（wall_pass）
+    //   写 passes → 可跨越；BattleRealEnd 恢复；EnterGrid 里禁停
+    // =================================================================
 
     /// <summary>
     /// 游戏算完移动范围后触发。记录本次调用的参数、输出列表内容，
@@ -2172,6 +2102,10 @@ public class Plugin : MelonMod
             return null;
         }
     }
+
+    // =================================================================
+    // 【诊断区】只读探针 —— 不改变任何游戏行为，全部受 diagnostics 门控
+    // =================================================================
 
     /// <summary>
     /// 渲染探针（只读）：<c>GridUnitData.set_GridRenderType</c> 是"把某格染成某种状态"
