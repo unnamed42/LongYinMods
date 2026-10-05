@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!--
+      Deliberately NOT net6.0: this runs on the developer's machine, not inside the game, so it
+      should follow whatever SDK is installed. Pinning net6.0 makes it fail to launch on a box that
+      only has a newer runtime ("You must install or update .NET"), which is exactly what happened
+      when this was first written against the game's target framework by reflex.
+    -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <AssemblyName>find_callers</AssemblyName>
+    <RootNamespace>FindCallers</RootNamespace>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Mono.Cecil ships with MelonLoader, so referencing the installed copy costs no new dependency.
+      The path is a parameter rather than a literal so the project stays usable on a machine whose
+      game lives somewhere else; see find_callers.sh, which supplies it.
+    -->
+    <Reference Include="Mono.Cecil">
+      <HintPath Condition="'$(CecilPath)' != ''">$(CecilPath)</HintPath>
+      <HintPath Condition="'$(CecilPath)' == ''">$(MSBuildThisFileDirectory)../../gamedir/MelonLoader/net6/Mono.Cecil.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

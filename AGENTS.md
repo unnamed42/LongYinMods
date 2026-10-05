@@ -299,6 +299,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | `tools/recompile_mod.sh <Mod.dll>` | 反编译第三方 mod 并重编（全限定输出 + 补引用 + 构建 + 验证）。见 [docs/mod-recompilation.md](docs/mod-recompilation.md) |
 | `tools/il2cpp_unwind.py <dump>` | 从 minidump 做 IL2CPP 栈回溯（绕开 gdb 的无 frame pointer 问题） |
 | `tools/gdb_catch.sh <pid>` | 附加 gdb 抓崩溃现场 |
+| `tools/find_callers/find_callers.sh <方法名>` | 找谁调用了某方法（读 cpp2il 调用图属性，约 1.5 秒）。见 [docs/find-callers.md](docs/find-callers.md) |
 
 ---
 
