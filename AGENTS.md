@@ -325,7 +325,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | `tools/il2cpp_unwind.py <dump>` | 从 minidump 做 IL2CPP 栈回溯（绕开 gdb 的无 frame pointer 问题） |
 | `tools/gdb_catch.sh <pid>` | 附加 gdb 抓崩溃现场 |
 | `tools/find_callers/find_callers.sh <方法名>` | 找谁调用了某方法（读 cpp2il 调用图属性，约 1.5 秒）。见 [docs/find-callers.md](docs/find-callers.md) |
-| `tools/mcp_selftest.py` | **MelonMCP 自检**：一条命令跑完传输层 + `execute_csharp` 语义回归（26 项，约 0.3 秒）。退出码 `0`/`1`/`2` = 全过 / 有失败 / 连不上。改完 `execute_csharp` 必跑。见 [docs/runtime-probing.md](docs/runtime-probing.md) §7.1 |
+| `tools/mcp_selftest.py` | **MelonMCP 自检**：一条命令跑完传输层 + `execute_csharp` 语义回归（27 项，约 0.3 秒）。退出码 `0`/`1`/`2` = 全过 / 有失败 / 连不上。改完 `execute_csharp` 必跑。见 [docs/runtime-probing.md](docs/runtime-probing.md) §7.1 |
 
 ---
 

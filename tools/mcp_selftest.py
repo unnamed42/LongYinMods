@@ -184,12 +184,13 @@ def transport_checks(url, timeout):
 #   regex     返回文本必须匹配的正则
 #   is_error  期望的 isError（默认 False）
 #
-# ⚠️ 用例之间共享会话状态，**顺序有意义**（前面的 a/b/l 后面要用）。
+# ⚠️ 只留这一条依赖以外的用例，每个都**自带前置状态**，所以顺序无关、
+#   也能用 --only 挑着跑（脚本开头会先 reset 一次）。
 
 CASES = [
     {
         "name": "表达式",
-        "steps": [{"code": "1 + 1", "reset": True, "text": "2"}],
+        "steps": [{"code": "1 + 1", "text": "2"}],
     },
     {
         "name": "语句 + 裸尾表达式",
@@ -201,7 +202,12 @@ CASES = [
     },
     {
         "name": "LINQ 扩展方法",
-        "steps": [{"code": "l.Where(x => x > 1).Count()", "text": "2"}],
+        "steps": [
+            {
+                "code": "var linq9 = new List<int> { 1, 2, 3 }; linq9.Where(x => x > 1).Count()",
+                "text": "2",
+            }
+        ],
     },
     {
         "name": "for 循环",
@@ -222,13 +228,17 @@ CASES = [
     },
     {
         "name": "跨调用变量仍在",
-        "steps": [{"code": "a + b + l.Count", "text": "6"}],
+        "steps": [
+            {"code": "int ca9 = 1; int cb9 = 2;", "contains": "no value returned"},
+            {"code": "var cl9 = new List<int> { 1, 2, 3 };", "contains": "no value returned"},
+            {"code": "ca9 + cb9 + cl9.Count", "text": "6"},
+        ],
     },
     {
         "name": "定义 class",
         "steps": [
             {
-                "code": "class Selftest9 { public static int N; public static void Inc() { N++; } }",
+                "code": "class Plain9 { public static int N; public static void Inc() { N++; } }",
                 "contains": "no value returned",
             }
         ],
@@ -266,19 +276,29 @@ CASES = [
     },
     {
         "name": "void 调用（不带分号）",
-        "steps": [{"code": "Selftest9.Inc()", "contains": "no value returned"}],
+        "steps": [
+            {"code": "class VoidA9 { public static void Inc() { } }", "contains": "no value returned"},
+            {"code": "VoidA9.Inc()", "contains": "no value returned"},
+        ],
     },
     {
         "name": "void 调用（带分号）",
-        "steps": [{"code": "Selftest9.Inc();", "contains": "no value returned"}],
+        "steps": [
+            {"code": "class VoidB9 { public static void Inc() { } }", "contains": "no value returned"},
+            {"code": "VoidB9.Inc();", "contains": "no value returned"},
+        ],
     },
     {
         # 探针：副作用只发生一次。必须跨调用 —— 同一次 snippet 内自增，跑两遍也是同一个数。
         "name": "副作用只发生一次",
         "steps": [
-            {"code": "Selftest9.N = 0;", "contains": "no value returned"},
-            {"code": "Selftest9.N = Selftest9.N + 1;", "contains": "no value returned"},
-            {"code": "Selftest9.N", "text": "1"},
+            {
+                "code": "class Once9 { public static int N; public static void Inc() { N++; } }",
+                "contains": "no value returned",
+            },
+            {"code": "Once9.N = 0;", "contains": "no value returned"},
+            {"code": "Once9.N = Once9.N + 1;", "contains": "no value returned"},
+            {"code": "Once9.N", "text": "1"},
         ],
     },
     {
@@ -443,6 +463,14 @@ def main():
     # 3. 语义用例
     print()
     print("[execute_csharp 语义]")
+
+    # 先清一次会话：每个用例都自带前置状态，所以重复运行、或用 --only 挑着跑都不受影响。
+    try:
+        execute_csharp(args.url, {"code": "0", "reset": True}, args.timeout)
+        report("reset 会话状态（清掉上次遗留）", True)
+    except Failure as error:
+        report("reset 会话状态（清掉上次遗留）", False, str(error))
+
     selected = [case for case in CASES if not args.only or args.only in case["name"]]
     if not selected:
         print("  （--only {} 没匹配到任何用例）".format(args.only))
