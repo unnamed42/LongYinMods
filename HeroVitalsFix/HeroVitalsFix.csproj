@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>HeroVitalsFix</AssemblyName>
+    <RootNamespace>Unnamed42.HeroVitalsFix</RootNamespace>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <OutputType>Library</OutputType>
+    <Deterministic>true</Deterministic>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+
+    <!-- ★ 必须显式声明 x64。不写就是 AnyCPU，Roslyn 把 PE 头写成
+         Machine=i386 + OptionalMagic=PE32。对纯托管程序集 CLR 不据此拒绝加载，
+         但本项目全程是 64 位假设（IntPtr / 原生地址），声明 x64 让错误在构建期暴露。 -->
+    <PlatformTarget>x64</PlatformTarget>
+
+    <!-- ⚠️ 不要往 Version / InformationalVersion / AssemblyMetadata 里塞构建时刻：
+         它们都会变成 [assembly: ...] 特性（= 程序集内容），
+         内容一含时间，<Deterministic>true</Deterministic> 就形同虚设，
+         「部署后核对 md5 一致」这一步就永远失败。详见 AGENTS.md §3.2.0。 -->
+    <Version>1.0.0</Version>
+    <Authors>unnamed42</Authors>
+    <ModName>HeroVitalsFix</ModName>
+    <Description>修复切换人物后三维（生命/内力/体力）显示不刷新</Description>
+
+    <GameDir>..\gamedir</GameDir>
+    <Il2cppDir>..\gamedir\MelonLoader\Il2CppAssemblies</Il2cppDir>
+    <MelonLoaderDir>..\gamedir\MelonLoader\net6</MelonLoaderDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MelonLoader">
+      <HintPath>$(MelonLoaderDir)\MelonLoader.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(MelonLoaderDir)\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(MelonLoaderDir)\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(Il2cppDir)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Il2CppSystem / Il2CppSystem.Core：Il2CppSystem.* 命名空间不在 Il2CppInterop.Runtime 里 -->
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(Il2cppDir)\Il2Cppmscorlib.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem.Core">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(Il2cppDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(Il2cppDir)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="MelonLoader.MelonInfo">
+      <_Parameter1>Unnamed42.HeroVitalsFix.Plugin</_Parameter1>
+      <_Parameter1_TypeName>System.Type</_Parameter1_TypeName>
+      <_Parameter2>$(ModName)</_Parameter2>
+      <_Parameter3>$(Version)</_Parameter3>
+      <_Parameter4>$(Authors)</_Parameter4>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>
