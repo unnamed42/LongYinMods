@@ -99,8 +99,8 @@ McsMCP 嵌的是 `lib/net35/mcs.dll`（跑在 net472），我们嵌的是 net6 �
 
 > 会话的 `CompilerSettings.Version` 实际是 `Experimental`（枚举最大值），**但它并不代表支持 C# 8**：
 > 上面 `switch` 表达式与 using 声明都失败了。**别用这个枚举值推断能力。**
-> ✅ **曾经的两个「静默失败」已修（2026-10）。** 如果你的会话里模型还在说「拆成两条语句」，
-> 那是旧经验。根因见下方「`execute_csharp` 的三类结果」。
+> ✅ **曾经的「静默失败」已修（2026-10）。** 如果你的会话里模型还在说「拆成两条语句」，
+> 那是旧经验。根因见下方「`execute_csharp` 的结果分类」。
 
 ⚠️ **已禁用的工具（不要再尝试，它们会让 MCP 客户端看到一个名字却永远失败）**：
 
@@ -139,7 +139,8 @@ McsMCP 嵌的是 `lib/net35/mcs.dll`（跑在 net472），我们嵌的是 net6 �
 | 现象 | 原因 / 对策 |
 |---|---|
 | **表达式里不能用 `return x`** | 交互式宿主方法返回 `void`，`return x` 报 `error CS0127`。**用裸尾表达式**：`var n = "x"; "hello " + n` |
-| ~~一整条超长单行表达式静默无结果~~ | ✅ **已修**（2026-10），见下方「三类结果」 |
+| ~~一整条超长单行表达式静默无结果~~ | ✅ **已修**（2026-10），见下方「结果分类」 |
+| 先定义 `class` 再写语句会报 `CS1525` | ✅ **已支持**（2026-10）—— 一个 snippet 可含多个「提交」，见下方同名小节 |
 | `Count` 报错 | 它是**方法**不是属性 → 写 `.Count()` |
 | `FindObjectsOfType<T>()` 找不到游戏数据类 | `GridUnitData` / `BattleUnit` 之类**不是 `UnityEngine.Object`**；要经游戏自己的容器取（如 `BattleController.battleMapData.GetGridData(r, c)`） |
 | `FindObjectOfType<Il2Cpp.Xxx>()` 报 `Method unstripping failed` | 改用 `FindObjectsOfType<MonoBehaviour>(true)` 按 `GetType().Name` 过滤 |
@@ -343,50 +344,103 @@ Log groups by prefix  (8 group(s) over 173 line(s))
 - 每个按钮独立 try/catch：池化对象里有已销毁的，一坏一格不影响整批
   （实测扫全部 951 个，`readErrors` 为 0）。
 
-#### `execute_csharp` 的三类结果（及曾经的静默失败）
+#### `execute_csharp` 的结果分类（及曾经的三个静默失败）
 
-**这三种情况必须能分辨** —— 混在一起会让人在**正确的代码**里找不存在的 bug
-（`AGENTS.md` 纪律 1）。现在它们确实是分开的：
+**编译失败 / 运行时异常 / 无值，这三者必须能分辨** —— 混在一起会让人在**正确的代码**
+里找不存在的 bug（`AGENTS.md` 纪律 1）。现在它们确实是分开的：
 
-| 结果文本 | 含义 | 你该做什么 |
-|---|---|---|
-| 值 / 文本 | 成功，有返回值 | — |
-| `Executed successfully; no value returned. ...` | 成功，但**没值** | 正常。要值就加**裸尾表达式** |
-| `(行,列): error CS....` | **编译失败** | 改代码 |
-| `Execution failed: ...` | 运行时异常 | 看栈 |
+| 结果文本 | MCP `isError` | 含义 | 你该做什么 |
+|---|---|---|---|
+| 值 / 文本 | false | 成功，有返回值 | — |
+| `Executed successfully; no value returned. ...` | false | 成功，但**没值** | 正常。要值就加**裸尾表达式** |
+| `Compilation failed:` + `(行,列): error CS....` | **true** | **编译失败，一行都没执行** | 改代码 |
+| `Execution failed: ...` | **true** | 跑起来了，抛异常 | 看栈 |
 
-**❗ 两个曾经的陷阱（已修，但旧会话/旧文档里还留着错经验）：**
+分类依据是 `ScriptResult` 带不带 `Exception`（`CompileError` 不带、`RuntimeError` 带），
+**两种失败的文案也故意不同** —— 别让它们共用一句。
+
+**❗ 三个曾经的陷阱（已修；旧会话/旧文档里可能还留着错经验）：**
 
 1. **「一整条超长单行表达式静默无结果」→ 拆成两条**
 2. **「循环体复杂就静默无结果」→ 用 `reset=true`**
+3. **「只看到 `(行,列): error CS....`，但工具报成功」→ 以为代码跑过了**
 
-两者其实是**同一个 bug**，且根因不在“表达式太长”或“循环太复杂”：
+**前两个是同一个 bug，第三个是另一个**；三者的根因都是
+`Mono.CSharp` 的 `Evaluate()` / `Run()` **根本无法表达「编译失败」**：
 
 ```csharp
-// 旧代码（ScriptSession.Run 的表达式模式）
+// 旧代码（ScriptSession.Run）
 value = _evaluator.Evaluate(code);
 hasValue = true;          // ← 无条件置 true，哪怕 value 是 null
+...
+_evaluator.Run(code);     // ← 返回 false 也不看，把诊断当 output 返回
 ```
 
-`Mono.CSharp` 的 `Evaluate()` **对返回 void 的调用不报错，只是返回 `null`**
-（例：`System.Console.WriteLine("x")`）。于是：
-
-- `hasValue = true` + `value = null` →
-- 下面那个 `if (!hasValue)` **不成立** → **整个语句模式被跳过**
-- → 得到一句与「真的无值」完全相同的 `Execution completed (no result).`，
+- **陷阱 1、2**：`Evaluate()` 对返回 void 的调用**不报错，只返回 `null`**
+  （例：`System.Console.WriteLine("x")`）。于是 `hasValue = true` + `value = null`
+  → 下面那个 `if (!hasValue)` **不成立** → **整个语句模式被跳过** →
+  得到一句与「真的无值」完全相同的 `Execution completed (no result).`，
   **既不报错、也无栈** —— 看起来就像“我查询写错了”。
+- **陷阱 3**：`Evaluate()` 与 `Run()` **编译失败时也不抛异常**
+  （`Evaluate` 回 `null`、`Run` 回 `true`），而旧代码只 `catch` 异常 →
+  编译错误**被当成成功的 output 返回**（`isError` 还是 false），
+  调用方根本不会去读它。
 
-修法是一行：`hasValue = value != null;` —— null 结果**落到语句模式**，
-由 `Run()` 重新执行并正常捕获编译/运行时错误。
+**修法**：不再用它们的返回值判断成败，改用**编译器自己的信号** ——
+`Evaluator.Compile(text, out CompiledMethod)` 配 report printer 的 `ErrorsCount`。
+判据与实现见下一节。
 
 > ⚠️ **`Console.WriteLine` 的输出从来不会被捕获** —— `_diagnostics` 是
 > **编译器**的 report printer（错误/警告），不是运行时的 stdout。
 > 用 `Console.WriteLine` 调试本就不行，得用**裸尾表达式**返回值。
 > （这条容易被误为是同一个 bug，但两者无关。）
 
-实测（2026-10，活进程）：同样是 void 调用 + 声明，
-修复前一律回 `Execution completed (no result).`；修复后回明确的
-「成功但无值」，而带裸尾表达式的写法一直正常。
+#### 一个 snippet 可以包含多个「提交」（定义 class 后直接用它）
+
+**症状**：在 `execute_csharp` 里先写 `class Foo { ... }` 再跟一句 `Foo.Bar()`，
+报 `CS1525: Unexpected symbol 'Foo'`，必须拆成两次调用（`reset` 也没用 ——
+它会把刚定义的 class 清掉）。这会让模型反复重试。
+
+**根因（读 Mono.CSharp 源码 + 活进程实测确认）**：交互式编译器
+**只用输入的第一个 token 决定解析模式**（`Evaluator.ToplevelOrStatement`）：
+
+| 第一个 token | 解析成 | 接受什么 |
+|---|---|---|
+| `class` / `struct` / `enum` / `interface` / `namespace` / `using X` | **compilation unit** | **只有声明**，遇到语句就 CS1525 停下 |
+| 其它（语句 / 表达式） | **statements** | 只有语句，遇到声明则报错 |
+
+所以「声明 + 语句」**无论谁在前**都会被拒 —— 但**报错位置恰好就是分界点**。
+`ScriptSession.RunAsSubmissions` 就用这个位置分段，逐段交给编译器：
+
+```
+Compile(整个输入) → 报错 (2,0)
+  ├─ 前缀 = 第 1..1 行   → Compile 成功 → 段 1
+  └─ 剩余 = 第 2..n 行   → 再试，如此循环
+最后一段的值就是整个 snippet 的值
+```
+
+**七条实现要点（改这段代码前必读）**：
+
+1. **成败信号是 `ErrorsCount`，不是 `compiled == null`。**
+   只声明类型的提交**本来就没有可执行方法**，`Compile` 会返回 `compiled == null`
+   而 `ErrorsCount == 0`；拿它当失败会把 `class Foo {}` 变成报错。
+2. **只在整段编译失败时才尝试分段**，所以原本能跑的代码语义不变。
+3. **前缀必须自己也能编译通过才认**。否则放弃分段并回报编译错误（优先报更具体的
+   那条）—— 猜错只能「没帮上忙」，不会悄悄改变语义。
+4. **分界点用编译器给的 `Location`（行/列）换算**。列是 1-based，
+   **列 0 = 行首**（跨行分界就是这个形状）。`Location` 的列只有 8 bit，
+   所以超长单行会回绕 —— 靠第 3 条挡住。
+5. **不要真的切掉前缀，而是把它抹成空白**（保留换行）——
+   这样后续每段仍带着**原始行号**，报错指向用户真正写的那一行。
+6. **一个提交只编译一次、只执行一次**。旧实现是先 `Evaluate` 再 `Run`，
+   所以**没有值可返回的语句会被执行两次**（实测 `N++` 一次调用后 `N == 2`）。
+   现在直接调用 `Compile` 交回来的 `CompiledMethod` —— 与
+   `Evaluator.Evaluate` 内部用的是同一个调用。
+7. **只有最后一段的值算整个 snippet 的值**，与「裸尾表达式」一致。
+
+实测（2026-10，活进程，逐步拆解验证）：整段 `err=1, (2,0)`；
+偏移算出 50 == `IndexOf("Foo.Bar()")`；前缀 `err=0, compiled=null`（只声明，
+`class Foo` 已生效）；剩余段 `err=0, compiled!=null`，调用拿回 7。
 
 #### ⚠️ `execute_csharp` 会**把游戏搞崩**：栈只有约 82 KiB
 

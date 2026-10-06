@@ -26,8 +26,10 @@ expressions and using declarations (C# 8) fail, as do when clauses and LINQ quer
 x.Where(...).Select(...)). switch type patterns (case int i:) hit an internal compiler error, use
 if (x is int i).
 
-State persists across calls; a trailing expression is returned. Runs on the Unity main thread with a
-small stack and cannot be interrupted: avoid MakeGenericMethod, deep reflection, infinite loops.";
+State persists across calls; a trailing expression is returned. Declarations and statements may be
+combined in one snippet - define a class, then call it, in the same call. Runs on the Unity main
+thread with a small stack and cannot be interrupted: avoid MakeGenericMethod, deep reflection,
+infinite loops.";
 
         /// <summary>
         /// Session shared by all script tools. State (variables, usings, defined types) persists

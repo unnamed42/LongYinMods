@@ -20,7 +20,7 @@ namespace MelonMCP.Tools
     public sealed class ScriptSession : IDisposable
     {
         private readonly StringWriter _diagnostics = new StringWriter();
-        private readonly MemoryStream _reportStream = new MemoryStream();
+        private readonly CapturingReportPrinter _printer;
         private Evaluator _evaluator;
         private bool _disposed;
 
@@ -41,6 +41,7 @@ namespace MelonMCP.Tools
 
         public ScriptSession()
         {
+            _printer = new CapturingReportPrinter(_diagnostics);
             Initialize();
         }
 
@@ -57,7 +58,7 @@ namespace MelonMCP.Tools
                 Unsafe = true,
             };
 
-            var context = new CompilerContext(settings, new StreamReportPrinter(_diagnostics));
+            var context = new CompilerContext(settings, _printer);
             _evaluator = new Evaluator(context);
 
             ImportLoadedAssemblies();
@@ -195,86 +196,337 @@ namespace MelonMCP.Tools
             }
         }
 
+        /// <summary>Sentinel separating "the snippet produced no value" from "it produced null".</summary>
+        private static readonly object NoValue = new object();
+
         /// <summary>
-        /// Compiles and executes a snippet, returning the value of the final expression when there
-        /// is one, otherwise any captured output.
+        /// Upper bound on how many pieces one snippet may be split into. A run of consecutive
+        /// declarations is consumed by a single parse, so only a snippet that alternates declarations
+        /// and statements many times comes anywhere near this.
+        /// </summary>
+        private const int MaxSubmissions = 64;
+
+        /// <summary>
+        /// Compiles and executes a snippet, returning the value of the final expression when there is
+        /// one, otherwise any captured diagnostics.
         ///
-        /// Two modes are tried in order:
-        ///   * Expression mode (Evaluate) - a trailing expression yields its value, so bare
-        ///     "1 + 1" and "SomeProperty" return a result.
-        ///   * Statement mode (Run) - full statements, declarations, foreach and control flow.
-        ///
-        /// Expression mode is tried first because it is the only one that produces a value, but it
-        /// rejects statements outright, so a genuine statement block falls through to Run. The
-        /// previous implementation called Compile/Run/Evaluate unconditionally, which forced every
-        /// submission into statement mode and made `return expr` fail with CS0127.
+        /// A snippet may contain several SUBMISSIONS, the way an interactive console accepts them one
+        /// after another: a run of declarations, then statements, then more declarations. That is not
+        /// a nicety - Mono.CSharp decides how to parse the whole input from its FIRST token (see
+        /// RunAsSubmissions), so without this a snippet that defines a class and then uses it is
+        /// rejected with CS1525 and forces the caller into two round trips.
         /// </summary>
         public ScriptResult Run(string code)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(ScriptSession));
             if (string.IsNullOrWhiteSpace(code)) throw new ArgumentException("Code is required");
 
-            _diagnostics.GetStringBuilder().Clear();
-            _reportStream.SetLength(0);
+            var submission = RunOneSubmission(code);
+            if (submission.Status == SubmissionStatus.Ok
+                || submission.Status == SubmissionStatus.RuntimeFailed)
+            {
+                return submission.ToResult();
+            }
 
-            object value = null;
-            bool hasValue = false;
-            string statementOutput = null;
+            // It did not compile as one submission. It may simply be several of them.
+            return RunAsSubmissions(code, submission);
+        }
 
-            // 1. Expression mode.
-            //
-            // hasValue tracks whether we actually have a RESULT TO RETURN, not merely whether
-            // Evaluate() returned without throwing. Those are different: Evaluate() happily accepts
-            // a void-returning call such as `System.Console.WriteLine("x")` and yields null. Treating
-            // that as "has a value" set hasValue = true with value == null, which then SKIPPED
-            // statement mode below - so the snippet ran but its output was thrown away, and the caller
-            // got the same bare "Execution completed (no result)" that a genuinely value-less snippet
-            // produces. The two are impossible to tell apart, which is exactly what made this bug
-            // expensive: it looks like "my query was wrong" and sends you editing correct code.
-            //
-            // Falling through on null is also what makes void statements work at all: statement mode
-            // re-runs the code under _evaluator.Run(), which is where a void call's diagnostics
-            // (captured output) come from.
+        /// <summary>
+        /// Compiles <paramref name="text"/> as ONE submission and, if it compiles, runs it exactly once.
+        ///
+        /// Compile success is decided by <c>compiled != null</c> and never by the return value of
+        /// Evaluator.Evaluate/Evaluator.Run. Those cannot report a parse failure at all: Evaluate
+        /// returns null both when the snippet parsed and produced no value AND when it did not parse,
+        /// and Run returns true in both cases. Treating them as a success signal is what made every
+        /// compile error come back as a SUCCESSFUL tool result, with the compiler's message sitting in
+        /// the output field where nothing would look for it.
+        /// </summary>
+        private Submission RunOneSubmission(string text)
+        {
             _diagnostics.GetStringBuilder().Clear();
-            string expressionError;
+            _printer.Clear();
+
+            string partial = _evaluator.Compile(text, out CompiledMethod compiled);
+
+            // Errors - not a null CompiledMethod - decide failure. The compiler returns no delegate
+            // at all for a submission that only declares types, because a compilation unit has no
+            // method to invoke, so compiled == null happens on success too. What separates a
+            // declaration that took effect from one that did not is whether anything was reported.
+            if (_printer.HasError)
+            {
+                return new Submission
+                {
+                    Status = SubmissionStatus.CompileFailed,
+                    Diagnostics = _diagnostics.ToString().Trim(),
+                    ErrorLocation = _printer.FirstErrorLocation,
+                };
+            }
+
+            if (partial != null)
+            {
+                return new Submission
+                {
+                    Status = SubmissionStatus.PartialInput,
+                    Diagnostics = _diagnostics.ToString().Trim(),
+                };
+            }
+
+            // Declarations only: they took effect, there is simply nothing to execute.
+            if (compiled == null)
+            {
+                return new Submission
+                {
+                    Status = SubmissionStatus.Ok,
+                    Diagnostics = _diagnostics.ToString().Trim(),
+                };
+            }
+
+            object retvalue = NoValue;
             try
             {
-                value = _evaluator.Evaluate(code);
-                hasValue = value != null;
-                expressionError = null;
+                // Calling the delegate the compiler just handed us is the same call
+                // Evaluator.Evaluate makes internally. Doing it here rather than through Evaluate
+                // means one compile and one execution per text; the previous Evaluate-then-Run
+                // implementation compiled twice and therefore EXECUTED TWICE whenever the snippet
+                // produced no value, so a void statement's side effects happened twice.
+                compiled(ref retvalue);
             }
             catch (Exception ex)
             {
-                expressionError = ex.Message;
-                value = null;
+                return new Submission
+                {
+                    Status = SubmissionStatus.RuntimeFailed,
+                    Diagnostics = _diagnostics.ToString().Trim(),
+                    Exception = ex,
+                };
             }
 
-            // 2. Statement mode, used both when expression mode rejected the input and when it
-            //    succeeded but produced no value.
-            if (!hasValue)
+            return new Submission
             {
-                _diagnostics.GetStringBuilder().Clear();
-                try
+                Status = SubmissionStatus.Ok,
+                Value = retvalue,
+                HasValue = !ReferenceEquals(retvalue, NoValue),
+                Diagnostics = _diagnostics.ToString().Trim(),
+            };
+        }
+
+        /// <summary>
+        /// Retries a snippet that failed to compile as one submission by splitting it where the
+        /// compiler itself says the current submission ended.
+        ///
+        /// WHY A BOUNDARY EXISTS AT ALL: Mono.CSharp picks the parse mode from the FIRST token
+        /// (Evaluator.ToplevelOrStatement). A declaration keyword first - class, struct, enum,
+        /// interface, namespace, or "using X" - makes it parse a COMPILATION UNIT, which accepts
+        /// declarations and nothing else, so the parser stops at the first statement and reports
+        /// CS1525 at it. A statement first makes it parse STATEMENTS, which rejects a following
+        /// declaration. Either way the reported location IS the split point, so no C# parser of our
+        /// own is needed.
+        ///
+        /// The split validates itself, because a piece that does not compile aborts the whole
+        /// attempt: if the compiler's boundary does not yield a compiling prefix, the original
+        /// whole-input error is reported instead. A wrong guess can therefore only fail to help,
+        /// never quietly change what the snippet means.
+        ///
+        /// Consumed text is blanked out of a copy of the input rather than cut from it, so every
+        /// later piece still compiles with the ORIGINAL line numbers and its diagnostics point at the
+        /// line the caller actually wrote.
+        /// </summary>
+        private ScriptResult RunAsSubmissions(string code, Submission wholeInputFailure)
+        {
+            var work = code.ToCharArray();
+            var pieces = new List<Submission>();
+            var failure = wholeInputFailure;
+            int consumed = 0;
+
+            while (true)
+            {
+                if (failure.Status == SubmissionStatus.RuntimeFailed) return failure.ToResult();
+
+                if (failure.Status != SubmissionStatus.CompileFailed || pieces.Count >= MaxSubmissions)
                 {
-                    _evaluator.Run(code);
-                    statementOutput = _diagnostics.ToString().Trim();
+                    return GiveUp(failure, wholeInputFailure);
                 }
-                catch (Exception ex)
+
+                int boundary = OffsetOf(failure.ErrorLocation, work);
+                if (boundary <= consumed || boundary >= code.Length)
                 {
-                    var errors = _diagnostics.ToString().Trim();
-                    var detail = string.IsNullOrWhiteSpace(errors) ? ex.Message : errors + "\n" + ex.Message;
+                    return GiveUp(failure, wholeInputFailure);
+                }
 
-                    if (!string.IsNullOrWhiteSpace(expressionError))
-                    {
-                        detail = expressionError + "\n" + detail;
-                    }
+                var head = RunOneSubmission(new string(work, 0, boundary));
+                if (head.Status == SubmissionStatus.RuntimeFailed) return head.ToResult();
+                if (head.Status != SubmissionStatus.Ok) return GiveUp(failure, wholeInputFailure);
 
-                    return ScriptResult.RuntimeError(detail, ex);
+                pieces.Add(head);
+
+                Blank(work, consumed, boundary);
+                consumed = boundary;
+
+                failure = RunOneSubmission(new string(work));
+                if (failure.Status == SubmissionStatus.Ok)
+                {
+                    pieces.Add(failure);
+                    break;
                 }
             }
 
-            var text = string.IsNullOrWhiteSpace(statementOutput) ? null : statementOutput;
-            return ScriptResult.Ok(hasValue ? Format(value) : null, hasValue, text);
+            var output = new List<string>();
+            foreach (var piece in pieces)
+            {
+                if (!string.IsNullOrWhiteSpace(piece.Diagnostics)) output.Add(piece.Diagnostics);
+            }
+
+            // Only the LAST piece's value is the snippet's value, matching "a trailing expression is
+            // returned": an earlier piece that happened to produce one is a step, not the answer.
+            var last = pieces[pieces.Count - 1];
+            return ScriptResult.Ok(
+                last.HasValue ? Format(last.Value) : null,
+                last.HasValue,
+                output.Count == 0 ? null : string.Join("\n", output));
+        }
+
+        /// <summary>
+        /// Converts a compiler Location into a character offset in <paramref name="text"/>.
+        ///
+        /// Column is 1-based, except that 0 means "the start of this line" - which is the shape a
+        /// boundary error takes when the trailing statement begins on a new line. Location packs the
+        /// column into 8 bits, so a line longer than 255 characters reports a wrapped column; the
+        /// caller's "the prefix must compile" check is what makes that harmless.
+        /// </summary>
+        private static int OffsetOf(Location location, char[] text)
+        {
+            if (location.IsNull) return -1;
+
+            int offset = 0;
+            for (int line = 1; line < location.Row; line++)
+            {
+                while (offset < text.Length && text[offset] != '\n') offset++;
+                if (offset >= text.Length) return -1;
+                offset++;
+            }
+
+            if (location.Column > 0) offset += location.Column - 1;
+            return offset <= text.Length ? offset : -1;
+        }
+
+        /// <summary>Replaces consumed text with spaces, keeping every line break in place.</summary>
+        private static void Blank(char[] text, int from, int to)
+        {
+            for (int i = from; i < to; i++)
+            {
+                if (text[i] != '\n' && text[i] != '\r') text[i] = ' ';
+            }
+        }
+
+        /// <summary>
+        /// Reports a snippet that could not be run either as a whole or as a sequence of submissions.
+        /// The most specific diagnostics available win: the nested failure once the split reached the
+        /// remainder, otherwise the original whole-input error.
+        /// </summary>
+        private static ScriptResult GiveUp(Submission failure, Submission wholeInputFailure)
+        {
+            var detail = string.IsNullOrWhiteSpace(failure.Diagnostics)
+                ? wholeInputFailure.Diagnostics
+                : failure.Diagnostics;
+
+            if (failure.Status == SubmissionStatus.PartialInput)
+            {
+                detail = string.IsNullOrWhiteSpace(detail)
+                    ? "Incomplete input"
+                    : "Incomplete input:\n" + detail;
+            }
+
+            return ScriptResult.CompileError(string.IsNullOrWhiteSpace(detail)
+                ? "The snippet could not be compiled."
+                : detail);
+        }
+
+        /// <summary>How one compiled submission ended.</summary>
+        private enum SubmissionStatus
+        {
+            Ok,
+            PartialInput,    // incomplete text: the compiler wants more of it
+            CompileFailed,   // syntax or semantic errors; nothing ran
+            RuntimeFailed,   // it compiled, but executing it threw
+        }
+
+        /// <summary>Outcome of compiling (and possibly running) one submission.</summary>
+        private sealed class Submission
+        {
+            public SubmissionStatus Status;
+            public object Value;
+            public bool HasValue;
+            public string Diagnostics;
+            public Location ErrorLocation;
+            public Exception Exception;
+
+            public ScriptResult ToResult()
+            {
+                if (Status == SubmissionStatus.RuntimeFailed)
+                {
+                    var detail = string.IsNullOrWhiteSpace(Diagnostics)
+                        ? Exception.Message
+                        : Diagnostics + "\n" + Exception.Message;
+                    return ScriptResult.RuntimeError(detail, Exception);
+                }
+
+                if (Status != SubmissionStatus.Ok)
+                {
+                    return ScriptResult.CompileError(Diagnostics);
+                }
+
+                return ScriptResult.Ok(
+                    HasValue ? Format(Value) : null,
+                    HasValue,
+                    string.IsNullOrWhiteSpace(Diagnostics) ? null : Diagnostics);
+            }
+        }
+
+        /// <summary>
+        /// A ReportPrinter that writes diagnostics like StreamReportPrinter (which it replaces) and
+        /// additionally remembers WHERE the first error was. That location is what lets Run split a
+        /// multi-submission snippet at the exact point the parser stopped.
+        ///
+        /// ReportPrinter.Reset() is not virtual, so Clear() has to be called before every compile.
+        /// ErrorsCount is deliberately not used as the failure signal - a null CompiledMethod is,
+        /// because that covers semantic errors as well as syntax errors.
+        /// </summary>
+        private sealed class CapturingReportPrinter : ReportPrinter
+        {
+            private readonly TextWriter _writer;
+
+            public CapturingReportPrinter(TextWriter writer)
+            {
+                _writer = writer;
+            }
+
+            /// <summary>Location of the first error reported since the last <see cref="Clear"/>.</summary>
+            public Location FirstErrorLocation { get; private set; }
+
+            /// <summary>
+            /// Whether the last compile reported any error. This - not a null CompiledMethod - is the
+            /// failure signal: the compiler returns NO delegate for a submission that only declares
+            /// types, so compiled == null happens on success as well.
+            /// </summary>
+            public bool HasError => ErrorsCount > 0;
+
+            public void Clear()
+            {
+                Reset();
+                FirstErrorLocation = Location.Null;
+            }
+
+            public override void Print(AbstractMessage msg, bool showFullPath)
+            {
+                if (!msg.IsWarning && FirstErrorLocation.IsNull && !msg.Location.IsNull)
+                {
+                    FirstErrorLocation = msg.Location;
+                }
+
+                Print(msg, _writer, showFullPath);
+                base.Print(msg, showFullPath);
+            }
         }
 
         /// <summary>Discards all session state (variables, usings, defined types).</summary>
@@ -284,7 +536,7 @@ namespace MelonMCP.Tools
             AppDomain.CurrentDomain.AssemblyLoad -= OnAssemblyLoad;
             _referencedAssemblies.Clear();
             _diagnostics.GetStringBuilder().Clear();
-            _reportStream.SetLength(0);
+            _printer.Clear();
             Initialize();
         }
 
@@ -328,7 +580,6 @@ namespace MelonMCP.Tools
             // enough for it to be collected along with the compiler context it owns.
             _evaluator = null;
             _diagnostics.Dispose();
-            _reportStream.Dispose();
         }
     }
 
@@ -368,7 +619,10 @@ namespace MelonMCP.Tools
         {
             if (!Success)
             {
-                return "Execution failed:\n" + Error;
+                // "Compilation failed" and "Execution failed" must not share a message: the first
+                // means nothing ran (the fix is a syntax or type error), the second means the
+                // snippet ran and threw. CompileError carries no Exception, which separates them.
+                return (Exception == null ? "Compilation failed:\n" : "Execution failed:\n") + Error;
             }
 
             var parts = new List<string>();
