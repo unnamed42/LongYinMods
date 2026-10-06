@@ -6,6 +6,19 @@
 
 ---
 
+## 0. 改 MelonMCP 前先看
+
+- **改完必跑** `python3 tools/mcp_selftest.py`（27 项，约 0.3 秒，退出码 0/1/2 = 全过/有失败/连不上）。
+  加用例时注意**每个用例要自带前置状态**，否则 `--only` 单跑会假失败。
+- **传输层两条红线**（碰了就重现故障）：永远发准确的 `Content-Length`（**绝不 chunked**）、
+  永远 `Connection: close`。**不要改回 `System.Net.HttpListener`** —— Proton 下走的是 Wine 的
+  http.sys，那是 stub，调到就 abort。
+- **`execute_csharp` 的成败信号是编译器的 `ErrorsCount`，不是 `compiled == null`** ——
+  只声明类型的提交本来就没有可执行方法，拿它当失败会把 `class Foo {}` 变成报错。
+- 部署和其它 mod 一样，**必须冷启动**（`AGENTS.md` §3.2.1）。
+
+---
+
 ## 1. 它是什么
 
 - 服务端源码在 `MelonMCP/`（本项目自建，Mono.CSharp REPL 已 ILRepack 内嵌，可执行完整 C# 语句）。

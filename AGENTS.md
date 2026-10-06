@@ -17,29 +17,27 @@
 
 因此所有代码都在**两个世界之间的边界**上：托管 C# 侧（MelonLoader / Harmony / Il2CppInterop）与原生侧（`GameAssembly.dll` 里编译后的 C++）。**本项目的大部分难度来自这条边界。**
 
-### 1.1 文档分工（写东西前先看这条）
+### 1.1 写文档：三条硬约束（写之前先看这条）
 
-| 内容 | 写在哪 | 为什么 |
-|---|---|---|
-| **不随游戏构建变化的**：工具命令、环境、API 用法、踩坑、项目约定 | `AGENTS.md`（简述）+ `docs/<专题>.md`（详情） | 换游戏版本也不失效 |
-| **具体的游戏地址 / 字段偏移 / metadata token / 调用链 / 实测行为** | `docs/<项目>.md`（如 [`friendlynoclip.md`](docs/friendlynoclip.md)） | **游戏一更新即失效** |
-| **游戏本身的知识** —— 仍不随构建变（世界观、数值规则） | MCP 知识库 `add_game_knowledge` | 与 mod 开发无关、更新也不变 |
-| **游戏本身的知识** —— 会随构建变（系统机制 / 组件用法 / 字段语义） | [`docs/game-internals.md`](docs/game-internals.md) | 做**别的 mod** 时会复用到，且**游戏更新即失效** |
+**内容归位**：
 
-**⭐ 本文件只写「判据 + 指令」，不写推导过程。** 这是上面表格的落地规则，也是本项目最常被违反的一条：
-
-| 写什么 | 放哪 |
+| 内容 | 去哪 |
 |---|---|
-| 「**该怎么做**」—— 结论、红线、判据、命令 | `AGENTS.md` |
-| 「**怎么得出的**」—— 实测数据、对照表格、源码/issue 引用、排错过程、踩坑始末 | `docs/<专题>.md` |
+| 不随游戏构建变的（工具命令 / 环境 / API 用法 / 踩坑 / 项目约定） | 本文件（判据）+ `docs/<专题>.md`（推导） |
+| 具体游戏地址 / 偏移 / metadata token / 调用链 / 实测行为 | `docs/<项目>.md` |
+| 游戏本身的知识（世界观 / 数值规则） | MCP 知识库 `add_game_knowledge` |
+| 游戏本身的知识但**随构建变**（机制 / 组件用法 / 字段语义） | [`docs/game-internals.md`](docs/game-internals.md) |
 
-判断方法：**一条内容删掉后，会不会让读者做错事？**
-会 ⇒ 它是判据，留在手册；不会（只是让人更信服 / 想知道前因后果）⇒ 它是推导，放子文档。
-
-> 反面例子（真实发生过）：md5 那一节曾把二分定位表格与 ILRepack 源码引用全写在 §3.2.0，
-> 占了 40 行；而读者需要的只是「Release 才可复现，别拿 Debug 的 md5 当版本指纹」两句话。
-
-⚠️ **细节搬到子文档后，必须在 §7 索引里留一行入口。** 否则不是「精简」，是「藏起来」。
+1. **不要原地 append。** 先找现有小节，找不到才新建；新建小节前先回答「这条属于哪个文件的哪一节」。
+   本文件只写「判据 + 指令」，推导（实测数据 / 对照表 / 源码引用 / 排错过程 / 踩坑始末）放 `docs/`。
+   判据检验：**删掉这句，读者会不会做错事？** 不会 ⇒ 它是推导。
+2. **新文档照 [`docs/_template.md`](docs/_template.md) 来**（标题 → 归属 → §0 判据速查 → 正文）。
+   超过 ~400 行的文档必须有 §0；确实不需要就写 `<!-- doc-lint: no-summary -->` 并说明理由。
+   §0 的作用是让**只需要结论的读者在 20 行内拿到答案**，需要推导的继续往下滚 ——
+   这比把文件拆两半好：没有跳转，也就不会漏看。
+3. **改完文档跑 `python3 tools/doc_lint.py`**：索引漏登记 / 悬空链接会让**提交失败**
+   （`.githooks/pre-commit`），它还会打印每份文档的**字符数增量** —— 膨胀要看得见。
+   搬走细节必须留入口，否则不是「精简」，是「藏起来」。
 
 ---
 
@@ -135,6 +133,16 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 让它自己在提权调用里顺手把 DLL 拷过去，就从根上消除了这一类误导。
 
 > ⚠️ 无论谁拷的，**都必须核对两边 md5 一致**才算部署成功。
+> ⚠️ **别用 `dotnet build … | tail` 判断构建成败。** 管道的退出码是 `tail` 的（0），
+> 构建**失败**也会继续往下跑 `cp`；而 `bin/` 里留着的是**上一次成功的产物**，
+> 于是你部署了旧 DLL —— **两边 md5 一致，部署校验抓不到**（它抓的是「拷错文件」，不是「构建失败」）。
+>
+> 用显式退出码：
+>
+> ```bash
+> dotnet build <Project>/<Project>.csproj -c Debug > /tmp/build.log 2>&1; ec=$?
+> [ $ec -eq 0 ] && cp <Project>/bin/Debug/net6.0/<Project>.dll gamedir/Mods/
+> ```
 
 #### 3.2.0 ⚠️ 别把构建时刻写进程序集（会毁掉 md5 校验）
 
@@ -325,6 +333,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | `tools/il2cpp_unwind.py <dump>` | 从 minidump 做 IL2CPP 栈回溯（绕开 gdb 的无 frame pointer 问题） |
 | `tools/gdb_catch.sh <pid>` | 附加 gdb 抓崩溃现场 |
 | `tools/find_callers/find_callers.sh <方法名>` | 找谁调用了某方法（读 cpp2il 调用图属性，约 1.5 秒）。见 [docs/find-callers.md](docs/find-callers.md) |
+| `tools/doc_lint.py` | **文档约定检查**：`docs/*.md` 漏登记 / 悬空链接会**挡住提交**（已挂 `.githooks/pre-commit`），并打印各文档字符数增量。见 §1.1 |
 
 ---
 
@@ -340,7 +349,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
 | **修 MelonMCP —— 构建部署 / 传输层 / 加工具 / 内部机制与 TODO** | [docs/melonmcp.md](docs/melonmcp.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
-| 看某个 mod 的设计与取舍 | [docs/friendlynoclip.md](docs/friendlynoclip.md)、[docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
+| 看某个 mod 的设计与取舍（含**指纹门控发布**的做法） | [docs/friendlynoclip.md](docs/friendlynoclip.md)、[docs/shiftclickupgrade.md](docs/shiftclickupgrade.md)、[docs/herovitalsfix.md](docs/herovitalsfix.md) |
 | **反编译别人的 mod 并重新编译**（无源码，要修它 / 改它） | [docs/mod-recompilation.md](docs/mod-recompilation.md) |
 | **游戏退出时卡死 / 进程不退出** | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
 | 查**游戏本身**的机制（音效 / 资源 / 建筑系统） | [docs/game-internals.md](docs/game-internals.md) |
@@ -357,5 +366,6 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | ShiftClickUpgrade | Shift+单击直接升级建筑 | [docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
 | ForceOverflowDividend | （**第三方 mod 修复**）门派资源溢出折现。游戏改签名导致 `MissingMethodException` | [docs/forceoverflowdividend.md](docs/forceoverflowdividend.md) |
 | WuMingPerformanceFix | （**第三方 mod 修复**）修退出卡死：worker 线程 attach 了 IL2CPP 却从不 detach | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
+| HeroVitalsFix | 修复「切换人物后三维（生命/内力/体力）显示不刷新」。**构建指纹门控**，游戏更新即自停 | [docs/herovitalsfix.md](docs/herovitalsfix.md) |
 
 > **通用内容写 `AGENTS.md` / `docs/<专题>.md`，项目内容写 `docs/<项目>.md`，新发现随代码改动一起更新（不是以后补）。**

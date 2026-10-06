@@ -1,0 +1,22 @@
+#!/bin/sh
+# 文档约定检查 —— 索引漏登记 / 悬空链接会挡住提交。
+#
+# 启用：git config core.hooksPath .githooks
+# 绕过：git commit --no-verify
+#
+# 设计上**失败开放**：python3 不在、脚本丢了、脚本自己崩了，都放行 ——
+# 它是护栏，不是闸门。真正会因为「检查有 bug」而卡住所有人的事，比它挡下的问题更糟。
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+lint="$root/tools/doc_lint.py"
+
+[ -f "$lint" ] || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
+
+python3 "$lint" --quiet || {
+    echo ""
+    echo "提交被挡下了：上面是文档错误（缺索引入口 / 悬空链接）。"
+    echo "改完重试；确实要绕过：git commit --no-verify"
+    exit 1
+}
+exit 0
