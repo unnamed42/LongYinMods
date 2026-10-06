@@ -110,6 +110,40 @@ monodis --assemblyref MyMod/bin/Release/net6.0/MyMod.dll | grep -i mcs
 > 自带一份 `Mono.CompilerServices.SymbolWriter`）。这就是 `Union="true"` +
 > `AllowedDuplicateNamespaces` 这两个参数存在的原因 —— 不能省。
 
+**⚠️ `DebugInfo="true"` 会让产物不可复现（根因已二分定位，2026-10）**
+
+ILRepack 从 2.0.36 起本身是确定性的（CHANGELOG：
+*“running it on the same inputs will produce byte-for-byte identical output”*），
+实现在 `WriterParameters`：
+
+```csharp
+var parameters = new WriterParameters {
+    ...,
+    WriteSymbols     = Options.DebugInfo,      // ★ 写 PDB 的那条路
+    DeterministicMvid = true,                  // ★ 确定性只覆盖这里
+};
+if (!Options.PreserveTimestamp)
+    parameters.Timestamp = ComputeDeterministicTimestamp();
+```
+
+**但 `WriteSymbols = Options.DebugInfo` 那条路不参与确定性。** 实测（MelonMCP）：
+
+| 配置 | `DebugInfo` | 连跑两次 md5 | |
+|---|---|---|---|
+| Debug | `true` | `3ff1b21f…` != `40fc9ec3…` | ❌ 每次不同 |
+| Debug（强改为 false） | `false` | `f725af93…` == `f725af93…` | ✅ 可复现 |
+| Release | `false` | `1b622926…` == `1b622926…` | ✅ 可复现 |
+
+（`ILRepack.Lib.MSBuild.Task` 2.0.48 已含 `DeterministicMvid` / `PreserveTimestamp`，
+所以只要你用的是 2.0.36+ 的引擎，就只剩 `DebugInfo` 这一个变量。）
+
+**怎么取舍**：
+
+- **不要为了 md5 把 Debug 的符号去掉** —— PDB 是 Debug 构建存在的意义（可读堆栈）。
+- 需要**逐字节可复现**的产物（发布、比对、存档）→ 构建 **Release**。
+- Debug 下的 md5 **只能当「同一份拷贝」的校验**，不能当「跨构建的内容指纹」。
+  参见 [`AGENTS.md`](../AGENTS.md) §3.2.0。
+
 **NuGet 缓存重定向**：若 `~/.nuget` 或 `~/.local/share/NuGet` 在只读/受限位置，
 在仓库根放 `nuget.config`：
 
