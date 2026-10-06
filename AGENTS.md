@@ -33,8 +33,6 @@
    判据检验：**删掉这句，读者会不会做错事？** 不会 ⇒ 它是推导。
 2. **新文档照 [`docs/_template.md`](docs/_template.md) 来**（标题 → 归属 → §0 判据速查 → 正文）。
    超过 ~400 行的文档必须有 §0；确实不需要就写 `<!-- doc-lint: no-summary -->` 并说明理由。
-   §0 的作用是让**只需要结论的读者在 20 行内拿到答案**，需要推导的继续往下滚 ——
-   这比把文件拆两半好：没有跳转，也就不会漏看。
 3. **改完文档跑 `python3 tools/doc_lint.py`**：索引漏登记 / 悬空链接会让**提交失败**
    （`.githooks/pre-commit`），它还会打印每份文档的**字符数增量** —— 膨胀要看得见。
    搬走细节必须留入口，否则不是「精简」，是「藏起来」。
@@ -51,14 +49,7 @@ LongYinMods/
 ├── gamedir -> ...         指向游戏根目录的软链接（必需，见下）
 ├── <Project>/             各 mod 的 C# 工程（csproj + 源码）
 
-├── output/                本地临时产物（全部不提交 git，见下）
-│   ├── decomp/            反编译辅助（il2cpp_map.py 等）
-│   ├── decomp/full/Il2Cpp/  ilspycmd 产出的完整托管反编译
-│   ├── decomp_gud/        Ghidra 反编译的 C 伪代码（关键函数）
-│   ├── cpp2il_out/        cpp2il 产物（含调用图属性）
-│   ├── dumper_out/        Il2CppDumper 产物（dump.cs / script.json）+ 自建 Ghidra 脚本
-│   ├── ghidra_proj/       已分析好的 Ghidra 工程（勿重新导入）
-│   └── logs/              Ghidra 等工具的日志
+├── output/                本地分析产物（**不进 git**，`.gitignore` 已忽略；各子目录见 docs/decompilation.md）
 ├── tools/                 自建脚本（gdb_catch.sh 等）
 ├── MelonMCP/              自建的 Unity MCP 服务端（见 [docs/melonmcp.md](docs/melonmcp.md)）
 │   ├── MelonMCP/          工程本体（csproj / 源码 / Server / Tools）
@@ -79,17 +70,13 @@ LongYinMods/
 > | `<Project>/<Project>.csproj` | `..\gamedir\...` |
 > | `<Project>/<Project>/<Project>.csproj`（多一层，如 MelonMCP） | `..\..\gamedir\...` |
 >
-> ⚠️ **不要在每个工程目录下各建一个 `gamedir` 软链接。** 那种做法看着方便，但：
-> ①它们是独立文件，换机器 / 重装时要逐个重建，忘一个就构建失败；
-> ②它们会被当成待提交内容（绝对路径的机器相关符号链接，**不能进 git**）；
-> ③路径一旦挪动就静默失效。
-> 统一从仓库根出发，只需维护**一个**链接（它在 `.gitignore` 里）。
+> ⚠️ **不要在每个工程目录下各建一个 `gamedir` 软链接** —— 它们是独立文件，换机器 / 重装要
+> 逐个重建；还会被当成待提交内容（绝对路径的机器相关符号链接，**不能进 git**）。
+> 统一从仓库根出发，只维护**一个**（它在 `.gitignore` 里）。
 >
 > ⚠️ **`gamedir` 是跨工作区边界的软链接**（指向游戏安装盘），**默认沙箱策略拒绝写入**。
 > 但**可以提权写入** —— 部署 DLL 这类写操作，**AI 自己提权完成即可**，
 > 不必推给用户（见 §3.2）。只有提权也做不到的操作才需要用户介入。
->
-> **`output/` 下全部是本地分析产物，不进 git**（`.gitignore` 已忽略 `output/`）。用反编译流程随时可重新生成。
 
 ---
 
@@ -106,15 +93,12 @@ dotnet build <Project>/<Project>.csproj -c Debug
 
 ### 3.2 部署：**读不用提权，只有写要**
 
-先分清两件事（本项目曾无差别地每次提权，白白打断用户）：
+先分清两件事：
 
 | 操作 | 要不要提权 |
 |---|---|
 | **读** `gamedir/` 下任何文件（DLL / 日志 / cfg / dump） | ❌ **不用** —— 普通 `read`/`bash` 就行 |
 | **写** `gamedir/`（部署 DLL、改 cfg） | ✅ **需要** `danger-full-access` |
-
-实测：`ls gamedir/version.dll` 与 `ls /run/media/.../coredump/` 在默认沙箱下都能完成；
-只有 `touch gamedir/Mods/x` 会报 `只读文件系统`。
 
 → **排查阶段（看日志、看 dump、读 DLL）一律不提权**；
 只在**最后部署**那一下提权，并在同一次调用里核对 md5。
@@ -126,11 +110,6 @@ cp <Project>/bin/Debug/net6.0/<Project>.dll gamedir/Mods/
 # 两边必须一致才算部署成功
 md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 ```
-
-**为什么这条要写进手册**：本项目**因为跑的是旧产物而白耗过整整两轮**，
-而且症状本身就是「代码不生效」—— **与真正的逻辑 bug 无法区分**，
-于是 AI 会跑去读一堆正确的代码，找不存在的 bug。
-让它自己在提权调用里顺手把 DLL 拷过去，就从根上消除了这一类误导。
 
 > ⚠️ 无论谁拷的，**都必须核对两边 md5 一致**才算部署成功。
 > ⚠️ **别用 `dotnet build … | tail` 判断构建成败。** 管道的退出码是 `tail` 的（0），
@@ -156,10 +135,6 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 三个都会变成 `[assembly: ...]` 特性 —— **即程序集内容**。内容含时间 ⇒ 不可复现，
 `<Deterministic>true</Deterministic>` 形同虚设，**同一份源码两次构建 md5 不同**，
 于是「部署后核对 md5」这一步永远失败（本项目曾因此混乱过）。
-
-> **关键认知**：`Deterministic` 只保证「**相同输入** → 逐字节相同输出」，
-> 它不会、也不可能把**输入里的时间戳**抹掉。
-> （另：它自 .NET SDK 起**默认就是 true**，写出来只为自文档化。）
 
 **判据：加任何「构建时刻 / 机器名 / 绝对路径」之前，先问「它会不会进程序集内容？」**
 会 ⇒ 不要加。
@@ -228,9 +203,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
   // ✓ 先判 IsAlive，或把属性访问整个包进 try/catch
   ```
 
-  本项目实例：退出诊断日志在 `ShutdownWorker()`（会 `Join`，线程已结束）**之后**读这两个属性，
-  于是**退出完全正常却报出一条 `[ERROR]`**。
-  → **任何日志/诊断代码都不允许抛异常**，否则它会伪装成真实故障。
+  **判据**：任何日志/诊断代码都不允许抛异常 —— 否则它会伪装成真实故障。
 
 ---
 
@@ -257,8 +230,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 
 ## 4. 六条最贵重的纪律
 
-**只有六条**（其余细节在专题文档里）。这些都是本项目**真金白银换来的**，
-且**跨游戏、跨任务都成立**：
+**只有六条**（细节在专题文档里）。**跨游戏、跨任务都成立**：
 
 1. **改完代码先确认产物与时机**，再去读代码 —— 否则会在正确的代码里找不存在的 bug。
    见 §3.2（md5）与 §3.2.1（冷启动）。
@@ -303,10 +275,9 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 
 **所有工具由用户安装，AI 一律不得自行下载或安装 —— 包括装到工作区内的情况。**
 
-这条曾被执行成「只禁止写 `~/.dotnet` 等沙箱外路径」，于是有人把单个可执行脚本
-`curl` 到工作区的 `tools/bin/` 里当作「不算安装」。**那是钻字面，不是守约定。**
 判断标准是**意图**而不是落地路径：只要一个工具在当前环境里原本不存在、需要你额外
-获取才能用，就应该停下来请用户装，不要自己想办法绕。
+获取才能用，就停下来请用户装，不要绕。（把单个脚本 `curl` 到 `tools/bin/` 也算装 ——
+钻字面不是守约定。）
 
 - ❌ `pip install` / `npm install` / `curl` 下载脚本 / 解压 tar 到任何位置
 - ❌ `~/.dotnet/tools`（会报 `Read-only file system`）
@@ -333,11 +304,11 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | `tools/il2cpp_unwind.py <dump>` | 从 minidump 做 IL2CPP 栈回溯（绕开 gdb 的无 frame pointer 问题） |
 | `tools/gdb_catch.sh <pid>` | 附加 gdb 抓崩溃现场 |
 | `tools/find_callers/find_callers.sh <方法名>` | 找谁调用了某方法（读 cpp2il 调用图属性，约 1.5 秒）。见 [docs/find-callers.md](docs/find-callers.md) |
-| `tools/doc_lint.py` | **文档约定检查**：`docs/*.md` 漏登记 / 悬空链接会**挡住提交**（已挂 `.githooks/pre-commit`），并打印各文档字符数增量。见 §1.1 |
+| `tools/doc_lint.py` | **文档约定检查**：`docs/*.md` 漏登记 / 悬空链接会让**提交失败**；并打印各文档字符数增量。新 clone 要 `git config core.hooksPath .githooks` 才自动生效。见 §1.1 |
 
 ---
 
-## 7. 专题文档索引
+## 7. 文档索引
 
 **按「我现在要做什么」查**：
 
@@ -349,23 +320,19 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
 | **修 MelonMCP —— 构建部署 / 传输层 / 加工具 / 内部机制与 TODO** | [docs/melonmcp.md](docs/melonmcp.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
-| 看某个 mod 的设计与取舍（含**指纹门控发布**的做法） | [docs/friendlynoclip.md](docs/friendlynoclip.md)、[docs/shiftclickupgrade.md](docs/shiftclickupgrade.md)、[docs/herovitalsfix.md](docs/herovitalsfix.md) |
 | **反编译别人的 mod 并重新编译**（无源码，要修它 / 改它） | [docs/mod-recompilation.md](docs/mod-recompilation.md) |
-| **游戏退出时卡死 / 进程不退出** | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
-| 查**游戏本身**的机制（音效 / 资源 / 建筑系统） | [docs/game-internals.md](docs/game-internals.md) |
+| 查**游戏本身**的机制（音效 / 资源 / 角色三维…） | [docs/game-internals.md](docs/game-internals.md) |
 | 遇到不认识的数值字段（是不是枚举？有哪几档？） | [docs/native-hooks.md](docs/native-hooks.md) 的「不透明字段三步排查法」 |
 | **拿不准 MelonLoader / Harmony / Unity / Il2CppInterop 该怎么用** | **先 websearch**，见 §3.5（框架有官方文档，不必挖 DLL） |
 
----
+**各 mod 的设计与取舍**（都含 §0 判据速查，可直接跳）：
 
-## 8. 各项目文档
-
-| 项目 | 说明 | 文档 |
+| mod | 干什么 | 设计文档 |
 |---|---|---|
 | FriendlyNoclip | 战斗格子地图允许穿越友方 | [docs/friendlynoclip.md](docs/friendlynoclip.md) |
 | ShiftClickUpgrade | Shift+单击直接升级建筑 | [docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
-| ForceOverflowDividend | （**第三方 mod 修复**）门派资源溢出折现。游戏改签名导致 `MissingMethodException` | [docs/forceoverflowdividend.md](docs/forceoverflowdividend.md) |
-| WuMingPerformanceFix | （**第三方 mod 修复**）修退出卡死：worker 线程 attach 了 IL2CPP 却从不 detach | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
-| HeroVitalsFix | 修复「切换人物后三维（生命/内力/体力）显示不刷新」。**构建指纹门控**，游戏更新即自停 | [docs/herovitalsfix.md](docs/herovitalsfix.md) |
+| HeroVitalsFix | 切人后三维（生命/内力/体力）显示不刷新。**构建指纹门控**，游戏更新即自停 | [docs/herovitalsfix.md](docs/herovitalsfix.md) |
+| ForceOverflowDividend | （**第三方 mod 修复**）门派资源溢出折现 | [docs/forceoverflowdividend.md](docs/forceoverflowdividend.md) |
+| WuMingPerformanceFix | （**第三方 mod 修复**）**游戏退出时卡死 / 进程不退出** | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
 
 > **通用内容写 `AGENTS.md` / `docs/<专题>.md`，项目内容写 `docs/<项目>.md`，新发现随代码改动一起更新（不是以后补）。**

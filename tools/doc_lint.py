@@ -129,6 +129,12 @@ def main():
             '{} 超过 {} 行却没有 「{}」 摘要块 —— 读者只好从头滚；'
             '不想加就在文件里写 <!-- doc-lint: no-summary -->'.format(path, SUMMARY_MIN_LINES, SUMMARY_HEADING))
 
+    # ── 警告：pre-commit 护栏没上膛（护具自己报告自己是否戴着）──────────────
+    hooked = sh('git', 'config', '--get', 'core.hooksPath')
+    if hooked is None or hooked.strip() != '.githooks':
+        warnings.append('pre-commit hook 未启用 —— 跑 `git config core.hooksPath .githooks`，'
+                        '否则本检查不会自动挡住坏提交（只在你手动跑时生效）')
+
     # ── 可选：跨文件重复的长行 ──────────────────────────────────────────────
     if args.dups:
         seen = {}
