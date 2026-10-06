@@ -62,7 +62,7 @@ LongYinMods/
 │   ├── ghidra_proj/       已分析好的 Ghidra 工程（勿重新导入）
 │   └── logs/              Ghidra 等工具的日志
 ├── tools/                 自建脚本（gdb_catch.sh 等）
-├── MelonMCP/              自建的 Unity MCP 服务端（见 [docs/runtime-probing.md](docs/runtime-probing.md)）
+├── MelonMCP/              自建的 Unity MCP 服务端（见 [docs/melonmcp.md](docs/melonmcp.md)）
 │   ├── MelonMCP/          工程本体（csproj / 源码 / Server / Tools）
 │   ├── lib/net6/mcs.dll   内嵌依赖（Mono.CSharp），构建必需，**要进 git**
 │   └── nuget.config       NuGet 缓存重定向
@@ -325,7 +325,6 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | `tools/il2cpp_unwind.py <dump>` | 从 minidump 做 IL2CPP 栈回溯（绕开 gdb 的无 frame pointer 问题） |
 | `tools/gdb_catch.sh <pid>` | 附加 gdb 抓崩溃现场 |
 | `tools/find_callers/find_callers.sh <方法名>` | 找谁调用了某方法（读 cpp2il 调用图属性，约 1.5 秒）。见 [docs/find-callers.md](docs/find-callers.md) |
-| `tools/mcp_selftest.py` | **MelonMCP 自检**：一条命令跑完传输层 + `execute_csharp` 语义回归（27 项，约 0.3 秒）。退出码 `0`/`1`/`2` = 全过 / 有失败 / 连不上。改完 `execute_csharp` 必跑。见 [docs/runtime-probing.md](docs/runtime-probing.md) §7.1 |
 
 ---
 
@@ -339,8 +338,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 给游戏方法挂 Harmony 补丁 | [docs/harmony-il2cpp.md](docs/harmony-il2cpp.md) |
 | 读写原生内存、装自制 detour、用 Iced 汇编 stub | [docs/native-hooks.md](docs/native-hooks.md) |
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
-| **给 MelonMCP 加工具 / 修它的工具** | [docs/runtime-probing.md](docs/runtime-probing.md) §7.1（工具总览与踩坑）+ §7.5（TODO 与已否决项） |
-| **MCP 客户端连不上游戏 / 改 MelonMCP 传输层** | [docs/mcp-http-transport.md](docs/mcp-http-transport.md) |
+| **修 MelonMCP —— 构建部署 / 传输层 / 加工具 / 内部机制与 TODO** | [docs/melonmcp.md](docs/melonmcp.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
 | 看某个 mod 的设计与取舍 | [docs/friendlynoclip.md](docs/friendlynoclip.md)、[docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
 | **反编译别人的 mod 并重新编译**（无源码，要修它 / 改它） | [docs/mod-recompilation.md](docs/mod-recompilation.md) |
