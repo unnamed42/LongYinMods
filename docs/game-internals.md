@@ -448,6 +448,8 @@ if (bd.buildTimeLeft > 0 || bd.upgradeTimeLeft > 0
 | 裸内存地址（CE 找到的）| **每次读档都会变**，不可当锚点 | §2.1 |
 | 资源是 float | 别强转 int | §2.1 |
 | 游戏更新改了**方法签名** | 旧编译的 mod 抛 `MissingMethodException`；**方法内**的 `catch` 拦不住（JIT 期抛出），要改反射 | §2.2a |
+| 缓存字段挂在**角色**上、控件却**共用** | 交错切人时「第二次回到 A」会跳过刷新，显示上一个角色的值 | §4.4 |
+| 手工改写被守卫读取的缓存字段做实验 | 会亲手满足「跳过」条件，得出反向结论 | §4.6 |
 
 ### 3.1 资源（Asset）加载
 
@@ -470,8 +472,159 @@ if (bd.buildTimeLeft > 0 || bd.upgradeTimeLeft > 0
 > 这些 clip 实际是被**预制体/场景**引用的。
 
 ---
+## 4. 角色三维（生命 / 内力 / 体力）的显示与刷新缓存
 
-## 4. 记录约定
+> 实测日期 **2026-10-07**，构建指纹同上。本节包含**当前版本一个已复现的显示 bug**（§4.4）。
+
+### 4.1 数值、控件与格式
+
+三条 bar 在**两个界面里是同一套命名、同一套字段**：
+
+| 数值 | 字段（`HeroData`） | 详情面板控件 | 战斗控件 |
+|---|---|---|---|
+| 生命 | `hp` / `maxhp` / `realMaxHp` | `Canvas/HeroDetailPanel/Hp/HpText` | `Canvas/BattleUIPanel/NowActiveHero/Hp/HpText` |
+| 内力 | `mana` / `maxMana` / `realMaxMana` | `…/Mp/ManaText` | `…/Mp/ManaText` |
+| 体力 | `power` / `maxPower` / `realMaxPower` | `…/Power/PowerText` | `…/Power/PowerText` |
+
+> ⚠️ 「内力 ↔ `mana`、体力 ↔ `power`」是按控件顺序 + `BattleController.startMovePower` 命名**推断**的，
+> **没有用一次真实消耗动作验证过**。用到时先确认：做一个消耗体力的动作，看哪条掉。
+
+每条 bar 的结构固定为四个子节点（`X` = `Hp` / `Mp` / `Power`；**注意 Mp 的子节点前缀是 `Mana`**）：
+
+| 子节点 | 作用 |
+|---|---|
+| `XBarBack` | 底图（`Image`） |
+| `XBar` | **填充条**（`Image`，用 `fillAmount`） |
+| `XReduceBar` | 「最近损失」的减量条 |
+| `XText` | 文本（`Text` + `Outline` + `SimpleDetailText`） |
+
+- 文本格式：`(int)(cur + 0.5f) + "/" + (int)(max + 0.5f)`
+  实测 `184.5 → 185`、`192.5 → 193` ⇒ 是**四舍五入（half away from zero）**，
+  **不是** `Mathf.RoundToInt`（银行家舍入会给 184 / 192）。
+- 填充量：`Mathf.Min(cur / max, 1)`（实测 `60/200 → fillAmount = 0.3`）。
+- 小数不进显示：数值都按**整数**渲染，所以 `±0.5` 的差异在界面上看不出来（排查时要注意）。
+
+### 4.2 谁在刷新它
+
+三条 bar 的写入口都是 `HeroData` 上的公开方法：`SetHpBar(GameObject)` / `SetMpBar` / `SetPowerBar`。
+`GameObject` 参数就是上面那条 bar 的**根节点**。
+
+调用图（`tools/find_callers` 实测；这些是**推断边**，见 [`find-callers.md`](find-callers.md)）：
+
+```
+详情面板点另一个角色 tab
+  HeroDetailTabController.OnClick
+    └─► HeroDetailController.FreshNowHeroDetail(HeroData, bool)
+          └─► HeroData.Set{Hp,Mp,Power}Bar        （三项都调）
+
+详情面板打开 / 战斗点格子 / 点角色头像
+  ShowHeroDetail.OnClick / HeroIconController.OnClick / BattleController.BattleGridClicked
+    └─► HeroDetailController.ShowHeroDetail(HeroData, bool)
+          └─► FreshHeroDetail(bool)
+
+战斗切换当前操作角色
+  BattleController.RefreshActiveUnitUI()
+    └─► HeroData.Set{Hp,Mp,Power}Bar
+```
+
+`SetHpBar` 共 **8** 个 caller，其中包含**每帧路径**：
+
+| caller | 频率 |
+|---|---|
+| `HudController.Update` | **每帧** |
+| `StudyAttackSkillController.Update` / `StudyDodgeSkillController.Update` / `StudyUniqueSkillController.Update` | **每帧** |
+| `HeroIconController.RefreshHeroIcon` / `BattleUnit.RefreshFollowUI` | 事件 |
+| `HeroDetailController.FreshNowHeroDetail` / `BattleController.RefreshActiveUnitUI` | 事件 |
+
+`SetPowerBar` 只有 **2** 个 caller（`FreshNowHeroDetail`、`RefreshActiveUnitUI`），都是**事件驱动**。
+> ⚠️ **`FreshNowHeroDetail` 在面板未激活时会提前返回**：实测面板关闭时调它，三个文本都不变。
+> 所以任何基于它的补丁 / 自检都必须等面板打开，**不能在启动时跑**。
+
+### 4.3 ⚠️ 渲染缓存：`shown*` 记账
+
+`HeroData` 上有一组 **12 个字段**，记录「上次往哪个控件画了什么值」：
+
+```
+shownHpBarRoot    shownHp    shownMaxHp    shownRealMaxHp
+shownMpBarRoot    shownMana  shownMaxMana  shownRealMaxMana
+shownPowerBarRoot shownPower shownMaxPower shownRealMaxPower
+```
+
+`SetXBar(root)` 的**实测**守卫语义（三者行为完全一致）：
+
+| 调用情形 | `SetHpBar` | `SetMpBar` | `SetPowerBar` |
+|---|---|---|---|
+| `shownXBarRoot == null` | 写 | 写 | 写 |
+| **同 root、同数值** | **跳过** | **跳过** | **跳过** |
+| 同 root、**数值变化** | 写 | 写 | 写 |
+
+即 `root == shownXBarRoot && cur == shownX && max == shownMaxX` ⇒ 直接 return。
+
+> 📌 缓存存在的意义看 caller 就明白：`SetHpBar` 在 `HudController.Update` 里**每帧**被调，
+> 无条件写 = 每帧重排文本 + `LTLocalization.SetText`。
+
+> ⚠️ **全场没有任何一处代码清空这些字段**：`grep -l 'shown*BarRoot'` 只命中 `HeroData.cs` 自己，
+> 即**没有失效机制**。旁证：`BattleController` 上是同一套缓存模式（`uiLastPostureValues`、
+> `uiLastExternalInjury`…），那边配了时间兜底 `ActiveUIStateFallbackInterval` + `uiLastStateRefreshTime`，
+> 而 `ResetActiveUIValueCache()` 这个看名字就是「主动失效」的方法 **0 个调用者**。
+
+### 4.4 ⚠️ 已知 bug：缓存挂在**角色**上，控件却是**共用**的
+
+缓存字段在 `HeroData`（每角色一份），但详情面板那条 bar 与战斗的 `NowActiveHero` 那条 bar
+是**一个控件轮流给所有角色用**。于是不变量「我说控件上是我的值 ⇒ 控件上就是我的值」不成立。
+
+实测（三条 bar 表现**完全一致**；`A` = 白云天，`B` = 陆良宫，同一个控件）：
+
+| 调用 | 控件最终显示 |
+|---|---|
+| `A.SetXBar(w)` | A 的值 ✅ |
+| `B.SetXBar(w)` | B 的值 ✅ |
+| `A.SetXBar(w)`（**第二次回到 A**） | **仍是 B 的值** ❌ |
+
+原因：A 的缓存仍写着「控件上是 A 的值」，而 A 的数值没变 ⇒ 守卫跳过。
+
+**为什么突出表现为体力**：守卫只在「数值变了」时才会发现异常。
+生命/内力在游玩中频繁变化 ⇒ 会自愈；**体力不常变 ⇒ 缓存永远“自认正确” ⇒ 一直卡住**。
+
+当前版本实测到的面板混合状态（`/Canvas/HeroDetailPanel`，节选）：
+
+| 面板标题 | 生命 | 内力 | 体力 |
+|---|---|---|---|
+| 白云天 | 3975（= 陆良宫 `hp=3975.26`）❌ | 5311（= 陆良宫 `mana=5311.42`）❌ | 193（= 白云天 `power=192.5`）✅ |
+
+> 📌 **推测（未证实）**：该 bug 疑似**本次更新引入** —— 猜测他们把「每角色一套 bar」改成了
+> 「共用一套 bar + 记账缓存」。**本机没有旧版 DLL（Steam 随时更新）、无法对照，故仅作推测。**
+
+### 4.5 怎么判断「官方是否已修」
+
+| 判据 | 方法 | 可靠性 |
+|---|---|---|
+| **行为**（推荐） | A→B→A 探针：记下 A 的值 → 切到 B → **切回 A**，看三条 bar 是否跟随 A。跟随=已修，停在 B=未修 | 高（直接测现象） |
+| 结构 1 | `HeroData` 上 `shown*BarRoot` / `shown*` 是否还在；字段消失或改名 ⇒ 缓存归属被改过 | 中 |
+| 结构 2 | `SetPowerBar` 等是否还在、签名是否变（签名变则旧 mod 抛 `MissingMethodException`，见 §2.2a） | 中 |
+| 结构 3 | `ResetActiveUIValueCache()` 是否开始有调用者 | 低（易误判） |
+
+探针可以机械化：`execute_csharp` 里用 `HeroDetailTabController.OnClick()`（或战斗里的
+`BattleController.RefreshActiveUnitUI()`）驱动**真实路径**，前后各读一次 bar 文本即可 ——
+**前后读数必须在同一次调用内完成**（面板会自己重建，同类问题见 §2.4d）。
+
+> ⚠️ **不建议做「启动时自动自检」**：探针必须真的切一次角色，会动 UI / 游戏状态，
+> 侵入性比 bug 本身还大；而且官方若只改 native 守卫，从 metadata 读不出语义。
+
+### 4.6 实验纪律（这次踩过的坑）
+
+- ⚠️ **不要手工改写 `shown*` / `shown*BarRoot` 这类「被判定逻辑读取的缓存字段」。**
+  本次调查中把 `shownPower` 手工设成与 `power` 相同的值，等于**亲手满足了「数值没变」的跳过条件**，
+  于是得出「`SetPowerBar` 只比 root、不比数值」的**反向结论**，白费两轮。
+  —— §4.3 那张表必须先 `shownXBarRoot = null` 再测，原因就在这里。
+- 读 UI 必须**在同一次调用内**完成（面板/菜单会自己重建）。
+- `Resources.FindObjectsOfTypeAll` **包含 inactive** 对象；面板关掉后 `nowShowHero` / `mainShowHero` 会变 `null`。
+- 判断一个控件「到底写没写」：先写入哨兵字符串（并同步 `SimpleDetailText.text`），调用目标方法后回读；
+  必要时再做一次全场景文本 diff，以区分「没写」和「写到别处去了」。
+
+---
+
+## 5. 记录约定
 
 - **只记与 mod 无关的游戏机制**（世界观、数值规则、内部系统）。
 - 需要具体地址/偏移的结论 → 仍写在这里，但**必须标注实测日期与构建指纹**（游戏一更新即失效）。
