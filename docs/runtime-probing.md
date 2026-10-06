@@ -74,6 +74,31 @@ MCP 客户端直连游戏进程，**不需要任何 bridge 脚本**：
   （`Where`/`Select`/`OrderBy`/`ToArray`）、`string.Join`、`typeof`、泛型类型、带局部变量的多语句。
 - ✅ **会话状态跨调用保持**（变量 / using / 自定义类型）；`execute_csharp` 传 `reset=true` 清空。
 - ❌ **不支持 `return x`** —— 见下方“注意事项”表（用裸尾表达式）。
+
+**语言版本：约 C# 7.1（不是 7.2）—— 已实测，2026-10**
+
+该工具的描述曾写「up to 7.2」，那是从 McsMCP 抄过来的。**那一句不可迁移**：
+McsMCP 嵌的是 `lib/net35/mcs.dll`（跑在 net472），我们嵌的是 net6 构建。
+（两份的 `LanguageVersion` 枚举完全相同，都是 `ISO_1…V_7, Default, V_7_1, V_7_2, Latest, Experimental`
+—— 即**语法上限一样**，差别只在运行时绑定。）
+
+**实际情况是双向都不准**，逐项在本进程里跑过：
+
+| 特性 | 版本 | 结果 |
+|---|---|---|
+| 元组 / `out var` / `is T x` / 数字分隔符 | 7.0 | ✅ |
+| `private protected` | 7.2 | ✅ |
+| **`in` 参数** | 7.2 | ❌ 不解析 |
+| **局部函数** | 7.0 | ❌ 不解析 |
+| **switch 表达式** / using 声明 | 8.0 | ❌ |
+| `case int i:` switch 类型模式 | 7.0 | ❌ 内部编译器错误 |
+| LINQ 查询语法（`from … select`） | 3.0 | ❌ |
+
+**要点**：报告版本号不如报告**具体能否用**。写成「7.1，7.2 只有 `private protected`」，
+比「7.2」准确 —— 后者会让人写出局部函数然后撞墙。
+
+> 会话的 `CompilerSettings.Version` 实际是 `Experimental`（枚举最大值），**但它并不代表支持 C# 8**：
+> 上面 `switch` 表达式与 using 声明都失败了。**别用这个枚举值推断能力。**
 > ✅ **曾经的两个「静默失败」已修（2026-10）。** 如果你的会话里模型还在说「拆成两条语句」，
 > 那是旧经验。根因见下方「`execute_csharp` 的三类结果」。
 

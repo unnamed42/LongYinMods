@@ -20,9 +20,11 @@ namespace MelonMCP.Tools
         public override string Name => "execute_csharp";
         public override string Description => @"Execute C# in-process; all Unity, game and MelonLoader types are available.
 
-C# up to 7.2, EXCEPT: switch type patterns (case int i:) -> internal compiler error, use
-if (x is int i); when clauses, local functions and in parameters are not parsed; LINQ query syntax
-fails, use x.Where(...).Select(...).
+C# 7.0/7.1 in full (tuples, out-var, pattern matching, numeric separators). Of 7.2 only
+'private protected' works - local functions and in parameters are not parsed. Nothing newer: switch
+expressions and using declarations (C# 8) fail, as do when clauses and LINQ query syntax (use
+x.Where(...).Select(...)). switch type patterns (case int i:) hit an internal compiler error, use
+if (x is int i).
 
 State persists across calls; a trailing expression is returned. Runs on the Unity main thread with a
 small stack and cannot be interrupted: avoid MakeGenericMethod, deep reflection, infinite loops.";
