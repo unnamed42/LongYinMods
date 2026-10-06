@@ -141,36 +141,16 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 **判据：加任何「构建时刻 / 机器名 / 绝对路径」之前，先问「它会不会进程序集内容？」**
 会 ⇒ 不要加。
 
-> ⚠️ **md5 在 ILRepack 工程上并非总是稳定的 —— 而且根因已定位：`DebugInfo=true`。**
+> ⚠️ **md5 只有在 Release 下可复现。** 内嵌第三方 DLL（ILRepack）时，`DebugInfo=true`（即写 PDB，
+> 也就是 **Debug 配置**）会让每次构建的 md5 都不同 —— Debug 构建**不可**当作跨构建的内容指纹。
 >
-> **实测（2026-10，MelonMCP）**：源码一字不改连续两次 `dotnet build`：
+> **所以**：
+> - ✅ **部署校验照做** —— 只要求两边来自**同一次构建**，它抓的是「拷错文件 / 跑了旧产物」。
+> - ❌ **别用 Debug 的 md5 回答「我部署的是不是我刚改的那版」** → 用**时间戳 + 是否冷启动**（§3.2.1），
+>   或改构 **Release**（它逐字节可复现）。
+> - ❌ **不要为了 md5 把 Debug 的 PDB 去掉** —— 符号正是 Debug 构建的意义。
 >
-> | 构建 | 两次 md5 | 结论 |
-> |---|---|---|
-> | `obj/…/MelonMCP.dll`（编译器原始输出） | `d245a0f2…` == `d245a0f2…` | ✅ 逐字节相同 |
-> | `bin/…` **-c Release**（`DebugInfo=false`） | `1b622926…` == `1b622926…` | ✅ **可复现** |
-> | `bin/…` **-c Debug**（`DebugInfo=true`） | `3ff1b21f…` != `40fc9ec3…` | ❌ 每次不同 |
->
-> **已二分定位**：把 Debug 配置里的 `MergeDebugInfo` 强改为 `false` 后，
-> Debug 构建立刻变为逐字节可复现（`f725af93…` == `f725af93…`）。
-> → **变量就是 `DebugInfo`，即是否写出 PDB。**
->
-> 这不是 ILRepack 的 bug。上游从 2.0.36 起就是确定性的（CHANGELOG：
-> *“ILRepack is now deterministic - running it on the same inputs will produce byte-for-byte identical output”*），
-> 实现为 `WriterParameters { DeterministicMvid = true, Timestamp = ComputeDeterministicTimestamp() }`；
-> 但同一处还有 `WriteSymbols = Options.DebugInfo` —— **写符号文件的那条路不参与确定性**。
-> 本项目用的 `ILRepack.Lib.MSBuild.Task` 2.0.48 已含 `DeterministicMvid` / `PreserveTimestamp`。
-> 这是**既有性质，不是某次改动引入的**（已用 `git stash` 在改动前的版本上复现过）。
->
-> **实际影响与应对**：
-> - ✅ **部署校验仍应做** —— 它要抓的是「拷错文件 / 跑了旧产物」那类错。
->   两份构建*功能上*完全相同，所以「拷过去再对比」依旧是有效的自洽检查：
->   只要两边来自**同一次构建**，就应一致。
-> - ❌ **Debug 产物不要当「跨构建的内容指纹」**去回答「我部署的是不是我刚改的那版」。
->   那种场景改用**时间戳 + 是否冷启动**（§3.2.1），或直接用 Release（它可复现）。
-> - 需要可复现的产物时就构建 **Release**（`DebugInfo=false`）；Debug 保留 PDB 是为了可读堆栈，
->   **不要为了 md5 而把 Debug 的符号去掉**。
-> - 副本：启动日志会打印自身 md5，可与 `md5sum` 对账。
+> 机制与实测见 [docs/ilrepack.md](docs/ilrepack.md) 末尾。
 
 > 历史始末（含已废弃的旁车文件方案）见 [docs/friendlynoclip.md](docs/friendlynoclip.md)。
 
@@ -344,6 +324,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 读写原生内存、装自制 detour、用 Iced 汇编 stub | [docs/native-hooks.md](docs/native-hooks.md) |
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
 | **给 MelonMCP 加工具 / 修它的工具** | [docs/runtime-probing.md](docs/runtime-probing.md) §7.1（工具总览与踩坑）+ §7.5（TODO 与已否决项） |
+| **MCP 客户端连不上游戏 / 改 MelonMCP 传输层** | [docs/mcp-http-transport.md](docs/mcp-http-transport.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
 | 看某个 mod 的设计与取舍 | [docs/friendlynoclip.md](docs/friendlynoclip.md)、[docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
 | **反编译别人的 mod 并重新编译**（无源码，要修它 / 改它） | [docs/mod-recompilation.md](docs/mod-recompilation.md) |
