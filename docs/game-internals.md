@@ -768,6 +768,52 @@ for (...) t.battleUnits[j].autoFight = true;   // 实测 15/15 生效
 > （`battleTime` 冻结）—— **看起来像模组 bug**。
 > 先确认它真的置上了，再去查目标代码（同 `AGENTS.md` 纪律 1）。
 
+### 5.9 攻城 / 守城战（AttackArea 图，含城墙）
+
+**唯一关键**：`BattleMapTypeData` 用 `(AttackAreaType, difficulty)` 构造，并**必须设 `targetArea`** ——
+不设的话 `normalGrids` / `obstacleGrids` 会是**空的**（地图根本没生成）。
+
+```csharp
+var wd = Resources.FindObjectsOfTypeAll<Il2Cpp.GameController>()[0].worldData;
+
+var mtd = new Il2Cpp.BattleMapTypeData(Il2Cpp.AttackAreaType.City, 1);   // 难度 1
+mtd.targetArea = wd.AreasDict[wd.cityAreaID[0]];   // ★ 必填，否则地图为空
+// 京城 id=0；worldData.cityAreaID 有 13 个城，villageAreaID 36 个村
+
+b.PrepareBattleMap(BattleType.StudyFight, attackers, defenders, "", false, false, mtd);
+```
+
+`AttackAreaType`：`City 0` / `Village 1` / `Force 2` / `Camp 3`。
+
+> ⚠️ 两个**不会**产生城墙的错路（都实测过）：
+> `BattleMapTypeData(BattleMapType.City, col, row)` → 无城墙；
+> `BattleMapTypeData(BattleMapType.AttackArea)`（一参构造）→ 构造器内 **NRE**。
+
+**实测产出**（京城）：
+
+| 项 | 值 |
+|---|---|
+| 地图 | **20x20**（`targetArea.mapWidth/Height` 是 15x15，攻城图另算） |
+| `wallColumn` | **13** —— 竖城墙，沿 row 铺满，中间留城门缺口 |
+| 城墙 | 22 段，`obstacleType=Wall`、**team=1**、hp=1120、**passes=0** |
+| 中立障碍 | 22 个，`team=-1` |
+
+**守方 = 第二个英雄列表（team1）**，会自动补上防御设施：
+**守卫 ×6、箭塔 ×N、战鼓、分舵**，外加你传进去的角色。攻方（team0）只有你传的人。
+实测 6 攻 vs 21 守（含 **6 座箭塔**）。
+
+##### ⚠️ 城墙的 `passes` 由「玩家队伍」决定
+
+城墙刚生成时 `passes=0`（不可通行）。模组按**玩家所属队伍**把己方城墙改成 `passes=15`：
+
+| 玩家位置 | 实测结果 |
+|---|---|
+| **在守方**（team1） | 22/22 段城墙写成 `passes=15` ✅ |
+| **不在战斗里**（随手挑人） | **0** 段被写 —— 正确地跳过（没玩家就没有「己方城墙」） |
+
+→ 想让 `wall_pass` 生效，构造时**必须把 `worldData.Player()` 放进守方**，
+否则会误判成「模组在攻城图上失效」。
+
 ---
 
 ## 6. 记录约定
