@@ -146,4 +146,48 @@ HarmonyLib.HarmonyException: Patching exception in method null
 grep -rn "\[HarmonyPatch" --include=*.cs          # 类级、且没带参数的即是元凶
 monodis --customattr MyMod.dll | grep -i HarmonyPatch   # IL 层核实已清干净
 ```
+### 5.9 ⚠️ 临时探针：`Patch()` 报错**也可能已经挂上了**
+
+**这是本项目的一次真实事故**（用 `execute_csharp` 挂探针时踩到，毁掉了一轮实验）。
+
+**症状**：`Harmony.Patch()` 抛 `IL Compile Error (unknown location)`，但补丁**已经注册** ——
+`hook_patch_info` 里能看见它，`attached=true`、`patcherIsValid=true`。
+
+**后果链（最阴的部分）**：
+
+1. 多次失败尝试会**累积多个 prefix**（本例 `EnterGrid` 上堆了 3 个探针 + 模组自己的 1 个）；
+2. 更糟的是入口字节从 `ff 25 …`（detour 已装）**退回原始序言**；
+3. 于是**原有的补丁静默不再执行** —— 模组自己的 `EnterGrid` prefix 不跑了。
+
+于是得到**污染的测量结果**：探针在跑、真补丁没跑，看到的现象既不是原版也不是模组行为。
+本例中它表现为“出现叠人”，差点被当成复现成功。
+
+##### 怎么发现
+
+| 手段 | 征兆 |
+|---|---|
+| `hook_patch_info` 的 `patchCounts.prefixes` | 数量多于预期 |
+| 同工具的 `entryBytes` | 退回原始序言（如 `48 89 5C 24 10 …`），而非 `ff 25 …` |
+| **自家代码的计数器停止增长** | 本例 `_enterGridHits` 停在 1911 不动 —— 最直接的信号 |
+
+##### 怎么清（`UnpatchSelf()` 也会报同一个错）
+
+```csharp
+// ✗ 会抛 IL Compile Error
+harmony.UnpatchSelf();
+
+// ✓ 显式形式可行（实测已清干净）
+harmony.Unpatch(methodInfo, HarmonyPatchType.Prefix, ownerId);
+```
+
+清完**必须再 `hook_patch_info` 核对一次**（数量回到预期 + `entryBytes` 恢复 `ff 25`）。
+
+##### 纪律
+
+- **`execute_csharp` 里挂的临时补丁，挂完立刻 `hook_patch_info` 核对**；用完立刻显式卸掉。
+- **看到「挂载失败」不要假定没挂上** —— 去 `hook_patch_info` 看实际数量。
+- **能用轮询就不要挂补丁**：本项目这次查战斗占位，纯靠 `execute_csharp` 轮询就能拿到全部结论，
+  探针是多余的风险。需要每帧采样时，优先考虑挂在**你自己可控的**地方，或接受轮询的采样丢失。
+- 任何**影响目标方法的**探针，都必须先问：**它会不会改变我要观察的那个东西？**
+
 ---
