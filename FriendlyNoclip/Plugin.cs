@@ -1365,6 +1365,21 @@ public class Plugin : MelonMod
 
             _activeMap = __instance;
 
+            // 【无玩家 = 剧情战斗】实测：这种战斗里
+            //   bc.GetPlayerControlTeamID() 与 bc.GetPlayerTeam() 都**不返回「没有」**，
+            //   而是静默返回 team 0（攻方）—— 于是 passes 被写给攻方，
+            //   而城墙全属守方 ⇒ 一面都不匹配，守方永远拿不到越墙能力。
+            //   （配置里承诺的「守方 AI 自动获得同样能力」因此在剧情攻城战里从未生效。）
+            //
+            // ⚠️ 判据只能用 bc.havePlayer：实测在**建图时刻**（即本 postfix 运行时）
+            //   bc.playerBattleUnit **有玩家时也是 null**（单位还没生成）。
+            if (!HasPlayer())
+            {
+                // 回退：按「墙主」放行 —— 每面墙都属于它自己的队伍。
+                WallPassData.ApplyForWallOwners(__instance);
+                return;
+            }
+
             // selfTeamID：用「玩家操控的队伍」与「玩家所在队伍」都试一次。
             // 实测守城战时 GetPlayerControlTeamID 与城墙 teamID 一致；
             // 两个都写不会误伤 —— 因为判据仍是 obstacleType==Wall，
@@ -1375,6 +1390,8 @@ public class Plugin : MelonMod
 
             // 若玩家队伍与「玩家操控队伍」不同（例如观战/AI 托管），
             // 把另一个也放行，保证守方 AI 同样能穿越自己城墙。
+            // ⚠️ 这第二次调用以前**永远不生效**（Apply 的幂等标记已被第一次置位）；
+            //    现已改为按「地图 + 目标」分别记账。
             int playerTeamID = ResolvePlayerTeamID();
 
             if (playerTeamID != selfTeamID)
@@ -1443,6 +1460,64 @@ public class Plugin : MelonMod
         }
 
         return int.MinValue;
+    }
+
+    /// <summary>
+    /// 本场战斗**是否真有玩家参战**。
+    ///
+    /// <para>
+    /// 【为什么不能只看解析出来的队伍】实测：无玩家的剧情战斗里
+    /// <c>GetPlayerControlTeamID()</c> 与 <c>GetPlayerTeam()</c> 都**不返回「没有」**，
+    /// 而是静默返回 <b>team 0（攻方）</b> —— 一个看似合理的错误答案。
+    /// 据此给城墙置 <c>passes</c> 会一面都不匹配（城墙属于守方），功能静默失效。
+    /// </para>
+    ///
+    /// <para>
+    /// 【为什么用 <c>havePlayer</c> 而不是 <c>playerBattleUnit</c>】
+    /// 本判据在**建图时刻**（<c>GenerateMapObjs</c> 的 postfix 内）被调用，
+    /// 那时单位还没生成 —— 实测 <c>playerBattleUnit</c> **有玩家时也是 null**。
+    /// <c>bc.havePlayer</c> 在那一刻已经正确（实测：有玩家 True / 无玩家 False）。
+    /// </para>
+    /// </summary>
+    private static bool HasPlayer()
+    {
+        try
+        {
+            var bc = GetBattleController();
+
+            if (bc == null)
+            {
+                return true;   // 拿不到 controller：按「有玩家」走原路径，保持既有行为
+            }
+
+            if (bc.havePlayer)
+            {
+                return true;
+            }
+
+            // 冗余判据：任一队伍标了 havePlayer 也算有玩家。
+            var teams = bc.teams;
+
+            if (teams != null)
+            {
+                for (int i = 0; i < teams.Count; i++)
+                {
+                    BattleTeam? team = teams[i];
+
+                    if (team != null && team.havePlayer)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[城墙通行] 取 havePlayer 失败：{e.Message}");
+            return true;   // 读不到就保持既有行为
+        }
     }
 
     /// <summary>找当前的 <c>BattleController</c> 实例。</summary>

@@ -107,8 +107,22 @@ internal static class WallPassData
     /// <summary>已改写的格子及其**原值**，用于精确回滚。</summary>
     private static readonly List<(IntPtr Grid, int Original)> _modified = new();
 
-    /// <summary>本轮是否已经置位（避免同一场战斗里反复遍历）。</summary>
-    private static bool _applied;
+    /// <summary>
+    /// 本张地图上**已经置位过的目标**（队伍 ID；<see cref="AllWallOwners"/> 表示「按墙主」）。
+    ///
+    /// <para>
+    /// 【为什么不是一个 bool】早先用单个 <c>_applied</c> 标记「本图已做过」，
+    /// 结果 postfix 的第二次 <c>Apply(playerTeamID)</c> **永远直接返回** ——
+    /// 「玩家队伍与玩家操控队伍不同时把另一个也放行」这条设计**从未执行过**。
+    /// </para>
+    /// </summary>
+    private static readonly HashSet<int> _appliedKeys = new();
+
+    /// <summary>
+    /// 「按墙主放行」的键：不过滤队伍 —— 每面墙都属于它自己的队伍。
+    /// 用于**无玩家的剧情战斗**（见 <see cref="ApplyForWallOwners"/>）。
+    /// </summary>
+    internal const int AllWallOwners = int.MinValue;
 
     /// <summary>上次置位时的地图实例，用于检测换场。</summary>
     private static IntPtr _lastMap;
@@ -132,14 +146,15 @@ internal static class WallPassData
             IntPtr mapPtr = IL2CPP.Il2CppObjectBaseToPtr(map);
 
             // 换场（或首次）→ 先恢复旧地图上的改动，再重新置位。
-            if (_applied && mapPtr != _lastMap)
+            if (mapPtr != _lastMap)
             {
                 Restore();
+                _lastMap = mapPtr;
             }
 
-            if (_applied && mapPtr == _lastMap)
+            if (_appliedKeys.Contains(selfTeamID))
             {
-                return;
+                return;   // 本图 + 本目标已做过（换目标仍会继续）
             }
 
             var obstacles = map.obstacleGrids;
@@ -179,12 +194,17 @@ internal static class WallPassData
                     continue;   // 中立造景等：保持原样
                 }
 
-                int teamID = Marshal.ReadInt32(obstaclePtr + OffObstacleTeam);
-
-                if (teamID != selfTeamID)
+                if (selfTeamID != AllWallOwners)
                 {
-                    continue;   // 他方城墙：保持原样
+                    int teamID = Marshal.ReadInt32(obstaclePtr + OffObstacleTeam);
+
+                    if (teamID != selfTeamID)
+                    {
+                        continue;   // 他方城墙：保持原样
+                    }
                 }
+                // selfTeamID == AllWallOwners：**不过滤队伍** ——
+                // 每面墙都属于它自己的队伍，按「墙主可跨」放行。
 
                 int original = Marshal.ReadInt32(gridPtr + OffPasses);
 
@@ -200,13 +220,16 @@ internal static class WallPassData
                 }
             }
 
-            _applied = true;
+            _appliedKeys.Add(selfTeamID);
             _lastMap = mapPtr;
 
+            string scope = selfTeamID == AllWallOwners
+                ? "按墙主放行（无玩家）"
+                : $"teamID={selfTeamID}";
+
             Plugin.LogInfo(() =>
-                $"[城墙通行] 已放行 {changed} 面己方城墙（teamID={selfTeamID}）：" +
-                $"passes {PassesWalkable}，可跨越但不入高亮。" +
-                $"中立障碍与他方城墙未改动。");
+                $"[城墙通行] 已放行 {changed} 面城墙（{scope}）：" +
+                $"passes {PassesWalkable}，可跨越但不入高亮。");
         }
         catch (Exception e)
         {
@@ -214,7 +237,27 @@ internal static class WallPassData
         }
     }
     /// <summary>
-    /// 判断一格是否为<b>城墙</b>，是则输出它的 <c>teamID</c>。
+    /// **无玩家的剧情战斗**专用：按「墙主」放行 —— 每面墙都属于它自己的队伍。
+    ///
+    /// <para>
+    /// 【为什么要这个回退】实测：无玩家的战斗里
+    /// <c>BattleController.GetPlayerControlTeamID()</c> 与 <c>GetPlayerTeam()</c>
+    /// 都**不返回「没有」**，而是静默返回 team 0（攻方）。
+    /// 而城墙全属**守方**（team 1）⇒ 一面都不匹配 ⇒
+    /// 配置里承诺的「守方 AI 自动获得同样能力」在剧情攻城战里**从未生效**。
+    /// </para>
+    ///
+    /// <para>
+    /// 剧情战斗没有玩家角色可供参照，所以按「每面墙属于它自己的队伍」放行 ——
+    /// 在攻城图里就等于守方（唯 一持有城墙的一方）。
+    /// </para>
+    /// </summary>
+    internal static void ApplyForWallOwners(BattleMapData map)
+    {
+        Apply(map, AllWallOwners);
+    }
+
+    /// <summary>
     ///
     /// <para>
     /// 【为什么单独抽出来】<see cref="Apply"/> 用这套偏移决定「放行哪面墙」，
@@ -290,7 +333,7 @@ internal static class WallPassData
     {
         if (_modified.Count == 0)
         {
-            _applied = false;
+            _appliedKeys.Clear();
             _lastMap = IntPtr.Zero;
             return;
         }
@@ -308,7 +351,7 @@ internal static class WallPassData
         Plugin.LogInfo(() =>$"[城墙通行] 已恢复 {ok}/{_modified.Count} 面城墙的 passes。");
 
         _modified.Clear();
-        _applied = false;
+        _appliedKeys.Clear();
         _lastMap = IntPtr.Zero;
     }
 }
