@@ -835,13 +835,32 @@ mod ResolvePlayerTeamID() = 0
 
 > **纪律**：不要用「无玩家时 0 段被写」当作预期行为 —— 那是 bug 的表象。
 >
-> ✅ **已修**（提交 `3e55202`；构建 0 warning/0 error、已部署，**待冷启动后验证**）：
-> - 新增 `HasPlayer()`。**判据必须用 `bc.havePlayer`** —— 实测在建图时刻
->   `playerBattleUnit` **有玩家时也是 null**（单位尚未生成）；拿它判断会把
->   「玩家攻城」误判成「无玩家」，反而去打开守方城墙。
-> - 无玩家时走 `WallPassData.ApplyForWallOwners()`：按「每面墙属于它自己的队伍」放行。
-> - 去掉 `_applied` 幂等守卫（换成 `HashSet<int> _appliedKeys`，按「地图 + 目标」记账），
->   使 postfix 的第二次 `Apply` 真正生效。
+> ✅ **已修**（提交 `2f7ab10`；构建 0 warning/0 error、已部署，**待冷启动后验证**）：
+>
+> **四个游戏信号全部不可靠**（同一局实测）：
+>
+> | 信号 | 实测值 | 问题 |
+> |---|---|---|
+> | `bc.havePlayer` | `False` | 与「玩家单位在场上」**矛盾** |
+> | `GetPlayerControlTeamID()` | `0` | 玩家实际在 team 1 |
+> | `GetPlayerTeam()` | `0` | 同上 |
+> | `teams[].havePlayer` | team0/team1 **都可能 true** | 无法区分 |
+> | `bc.playerBattleUnit`（建图时刻） | `null` | **有玩家时也是 null** |
+>
+> **唯一可靠判据**：逐单位扫 `BattleUnit.playerControl`。
+> 新增 `ResolveTeamByPlayerControlUnit()`，三个入口都以它为首选，游戏 API 仅作回退。
+>
+> ⚠️ 而且**这类攻城战里游戏总会把玩家单位部署进守方（team1）** ——
+> 即使双方都传 NPC 门派（实测 team1 units=201 且含玩家、`playerControl=true`）。
+> 所以「玩家在攻方」这种情形可能根本构造不出来。
+>
+> 直接调用验证（进程内手动调 `ApplyForWallOwners`）：
+> `passes{0x22}` → `passes{15x22}`，`ModifiedCount=22`
+> ⇒ **回退机制本身正确**，此前缺的只是正确的调度判定。
+>
+> ⚠️ **仍未验证**：真正的「无玩家剧情攻城战」。构造测试时游戏总会把玩家
+> 部署进守方，所以回退路径目前只能靠直接调用验证（已过）。
+> 要坐实需在一场**真实剧情攻城战**里量 `playerControl` 是否有单位、`bc.havePlayer` 为何值。
 >
 > ⚠️ 构造测试时若**不**把 `worldData.Player()` 放进战斗，你复现到的是 **bug 现场**，
 > 而不是正常行为 —— 别把它当成对照组。
