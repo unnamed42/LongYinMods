@@ -386,6 +386,53 @@ UnityEngine.GameObject.Find("Canvas/BattleUIPanel/PrepareUIPanel/StartBattleButt
 —— 那会阻塞 Unity 主线程，实测把 `battleTime` 冻在 1.329）。实测记录见
 [docs/friendlynoclip.md](friendlynoclip.md)。
 
+##### 7.1.5.1 缩小地图与填障碍物
+
+地图尺寸可以在建图时就指定：
+
+```csharp
+var mtd = new Il2Cpp.BattleMapTypeData(Il2Cpp.BattleMapType.Wild, 9, 9); // col, row
+b.PrepareBattleMap(StudyFight, mine, theirs, "", false, false, mtd);   // → 9x9（默认 19x20）
+```
+
+建图**之后**还能重划可行区域（做拥挤场景用）：
+
+```csharp
+foreach (var g in allCells)
+    if (g.column != 0 && g.column != W-1)
+        g.gridType = Il2Cpp.GridType.Obstacle;   // None=0 / Normal=1 / Obstacle=2
+battleMapData.TidyGridList();                    // ★ 必调，否则两个列表与实际不符
+```
+
+| 约束 | 实测结果 |
+|---|---|
+| ⚠️ **顺序** | 填障碍**必须在 `PrepareBattleMap` 之后** —— 它内部会调 `GenerateMapObjs` 重建地图，之前的改动会被丢掉 |
+| ⚠️ **不能全填** | 64/64 全障 → **队伍为空、战斗停住**。生成器需要 Normal 格才能放人 |
+| ✅ 只留两列 | 8 单位正常上场，战斗正常跑 |
+| 人数溢出 | 一方人数 > 地图行数时，生成器会把多出来的人**溢到对面那列**（实测 14 人在 9 行图上 → 列0 放 9 个，列8 再放 5 个） |
+
+##### 7.1.5.2 随时干净退出战斗
+
+```csharp
+battleController.SureGiveUpBattle();   // → state=End
+battleController.BattleRealEnd();      // → state=None，UI 清空
+```
+
+**两个都要调。** 实测只调 `SureGiveUpBattle()` 会停在 `End`/`Attacking`
+（`playingAnim=True`、`battleTime` 冻结）；补上 `BattleRealEnd()` 才真正回世界地图。
+两个都是幂等的，**不必判断当前状态**。
+
+##### 7.1.5.3 ⚠️ `SetAllAuto` 不可靠 —— 直接写 `autoFight`
+
+`battleController.SetAllAuto(true)` 实测**返回成功但 0/15 个单位被置为自动**（依赖 UI 面板状态）。
+可靠做法是逐单位直接写：
+
+```csharp
+for (...) t.battleUnits[j].autoFight = true;   // 实测 15/15 生效
+```
+
+> ⚠️ **副作用陷阱**：`autoFight` 没设上时，战斗会卡在 `Attacking` + `playingAnim=True`，
+> 看起来像模组 bug。**先确认 `autoFight` 真的置上了，再去查模组**（纪律 1 的同类）。
 #### `execute_csharp` 的结果分类（编译失败 / 运行时异常 / 无值）
 
 **编译失败 / 运行时异常 / 无值，这三者必须能分辨** —— 混在一起会让人在**正确的代码**
