@@ -1,8 +1,0 @@
-{
-    "mcpServers": {
-        "melonmcp": {
-            "command": "node",
-            "args": ["C:/path/to/MelonMCP/mcp-bridge.js", "--host", "localhost", "--port", "27015"]
-        }
-    }
-}

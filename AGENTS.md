@@ -51,10 +51,7 @@ LongYinMods/
 
 ├── output/                本地分析产物（**不进 git**，`.gitignore` 已忽略；各子目录见 docs/decompilation.md）
 ├── tools/                 自建脚本（gdb_catch.sh 等）
-├── MelonMCP/              自建的 Unity MCP 服务端（见 [docs/melonmcp.md](docs/melonmcp.md)）
-│   ├── MelonMCP/          工程本体（csproj / 源码 / Server / Tools）
-│   ├── lib/net6/mcs.dll   内嵌依赖（Mono.CSharp），构建必需，**要进 git**
-│   └── nuget.config       NuGet 缓存重定向
+├── （原 MelonMCP/ 已迁出：那份 MCP 服务端的源码与文档现维护在 UnityMCP 仓库，本仓库不再包含）
 ```
 
 > **`gamedir` 只建在仓库根，各工程用相对路径上溯过去。**
@@ -318,7 +315,6 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 给游戏方法挂 Harmony 补丁 | [docs/harmony-il2cpp.md](docs/harmony-il2cpp.md) |
 | 读写原生内存、装自制 detour、用 Iced 汇编 stub | [docs/native-hooks.md](docs/native-hooks.md) |
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
-| **修 MelonMCP —— 构建部署 / 传输层 / 加工具 / 内部机制与 TODO** | [docs/melonmcp.md](docs/melonmcp.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
 | **反编译别人的 mod 并重新编译**（无源码，要修它 / 改它） | [docs/mod-recompilation.md](docs/mod-recompilation.md) |
 | 查**游戏本身**的机制（音效 / 资源 / 角色三维…） | [docs/game-internals.md](docs/game-internals.md) |

@@ -30,7 +30,7 @@ tools/find_callers/find_callers.sh <方法名> [选项]
 **因为它读的是静态文件，不是运行中的游戏。**
 
 `output/cpp2il_out/` 是 20 MB 的反编译产物。做成 MCP 工具就得：在游戏进程里加载这些
-程序集、往 `MelonMCP/` 里再塞一个 Cecil 依赖、而且**游戏没开就不能用** ——
+程序集、往那个 MCP 服务端里再塞一个 Cecil 依赖、而且**游戏没开就不能用** ——
 这一切只为回答一个与运行时状态毫无关系的问题。
 
 它属于 `tools/` 下的**离线分析器**，和 `il2cpp_unwind.py`、`recompile_mod.sh` 同类。

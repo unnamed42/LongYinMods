@@ -2,7 +2,7 @@
 
 > 归属：[`AGENTS.md`](../AGENTS.md) §7 的详细展开。
 > 有活进程就别猜日志 —— 本文件讲 MCP 探查与崩溃取证。
-> 本文件是**使用**视角（工具清单 + 使用注意）；MelonMCP 本身的开发见 [`melonmcp.md`](melonmcp.md)。
+> 本文件是**使用**视角（工具清单 + 使用注意）。
 
 ---
 
@@ -13,7 +13,6 @@
 | 该用哪个 MCP 工具 | §7.1（工具清单 + 每个工具的行为与注意） |
 | 代码写了却不生效 | `AGENTS.md` §5 排查顺序 + 本文 §7.3 生命周期（**「补丁挂上」≠「跑过」**） |
 | 崩了 / 卡死 / 进程不退出 | §7.4（minidump → 栈回溯） |
-| 想改 MelonMCP **本身** | [`melonmcp.md`](melonmcp.md) —— 本文件只讲**怎么用它** |
 
 ---
 
@@ -24,9 +23,6 @@
 ### 7.1 Unity MCP（MelonMCP）★ 推荐
 
 **可以对运行中的游戏执行 C# 表达式、直接读写活对象** —— 排查效率远高于读日志。
-
-> MelonMCP **本身的开发与维护**（构建、传输层、架构、内部机制、TODO/已否决项）见
-> **[`melonmcp.md`](melonmcp.md)** —— 只想**用它探查游戏**的读者不必打开。
 
 - **核心工具**：`execute_csharp` / `evaluate_expression` / `find_objects_of_type` / `list_game_objects` / `get_type_info` / `list_types` / `list_assemblies` / `read_logs`。
 - **排查补丁用的工具**（2026-10 新增）：`hook_patch_info`（补丁挂载/触发/生效 + patcher 类型 + 入口字节）、`list_patches`（全进程补丁清单，含其他 mod）、`disasm` / `read_mem` / `resolve_jump`（**运行时**字节与跳转解析）、`watch_field` / `unwatch_field`（轮询字段变化）。
@@ -80,7 +76,7 @@ McsMCP 嵌的是 `lib/net35/mcs.dll`（跑在 net472），我们嵌的是 net6 �
 > 会话的 `CompilerSettings.Version` 实际是 `Experimental`（枚举最大值），**但它并不代表支持 C# 8**：
 > 上面 `switch` 表达式与 using 声明都失败了。**别用这个枚举值推断能力。**
 > ✅ **曾经的「静默失败」已修（2026-10）。** 如果你的会话里模型还在说「拆成两句」，
-> 那是旧经验；根因与实现见 [`melonmcp.md`](melonmcp.md)。
+> 那是旧经验。
 
 ⚠️ **已禁用的工具（不要再尝试，它们会让 MCP 客户端看到一个名字却永远失败）**：
 
@@ -346,8 +342,6 @@ Log groups by prefix  (8 group(s) over 173 line(s))
 `class Foo { ... }` 后面直接跟 `Foo.Bar()` **同一次调用就行**，不必拆两次 ——
 早先这样会报 `CS1525`，现已支持（一个 snippet 可以含多个「提交」）。
 
-> 切分机制、七条实现要点，以及**改完 `ScriptSession` 必跑的回归自检**见
-> **[`melonmcp.md`](melonmcp.md)**。
 
 #### ⚠️ `execute_csharp` 会**把游戏搞崩**：栈只有约 82 KiB
 
