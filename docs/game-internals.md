@@ -834,8 +834,14 @@ mod ResolvePlayerTeamID() = 0
    `Apply(selfTeamID)` 之后的第二次 `Apply(playerTeamID)` **永远直接返回**。
 
 > **纪律**：不要用「无玩家时 0 段被写」当作预期行为 —— 那是 bug 的表象。
-> 疑似修法（待确认语义）：用 `bc.playerBattleUnit == null`（或 `!bc.havePlayer`）
-> 识别「无玩家」，此时回退到「城墙所属队伍」，并去掉/放宽 `_applied` 守卫。
+>
+> ✅ **已修**（提交 `3e55202`；构建 0 warning/0 error、已部署，**待冷启动后验证**）：
+> - 新增 `HasPlayer()`。**判据必须用 `bc.havePlayer`** —— 实测在建图时刻
+>   `playerBattleUnit` **有玩家时也是 null**（单位尚未生成）；拿它判断会把
+>   「玩家攻城」误判成「无玩家」，反而去打开守方城墙。
+> - 无玩家时走 `WallPassData.ApplyForWallOwners()`：按「每面墙属于它自己的队伍」放行。
+> - 去掉 `_applied` 幂等守卫（换成 `HashSet<int> _appliedKeys`，按「地图 + 目标」记账），
+>   使 postfix 的第二次 `Apply` 真正生效。
 >
 > ⚠️ 构造测试时若**不**把 `worldData.Player()` 放进战斗，你复现到的是 **bug 现场**，
 > 而不是正常行为 —— 别把它当成对照组。
