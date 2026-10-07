@@ -809,10 +809,42 @@ b.PrepareBattleMap(BattleType.StudyFight, attackers, defenders, "", false, false
 | 玩家位置 | 实测结果 |
 |---|---|
 | **在守方**（team1） | 22/22 段城墙写成 `passes=15` ✅ |
-| **不在战斗里**（随手挑人） | **0** 段被写 —— 正确地跳过（没玩家就没有「己方城墙」） |
+| **不在战斗里**（剧情战斗：无玩家角色） | **0** 段被写 —— ⚠️ **这是 bug，不是「正确跳过」**（见下） |
 
-→ 想让 `wall_pass` 生效，构造时**必须把 `worldData.Player()` 放进守方**，
-否则会误判成「模组在攻城图上失效」。
+##### ⚠️⚠️ 无玩家的剧情攻城战：`wall_pass` **静默失效**
+
+实测（2026-10-07，构造的无玩家攻城战）：
+
+```
+havePlayer=False   playerBattleUnit=<null>
+bc.GetPlayerControlTeamID() = 0      ← ★ 返回 0，不是哨兵
+bc.GetPlayerTeam()          = ID=0   ← ★ 也不是 null，而是 team 0
+mod ResolveSelfTeamID()   = 0
+mod ResolvePlayerTeamID() = 0
+城墙 22 段（teamID=1）→ passes 全 0
+```
+
+两个根因（都已核实）：
+
+1. **游戏 API 在无玩家时静默返回 team 0**（攻方），而不是「没有」。
+   模组据此把 `passes` 写给 team 0 → 一面墙都不匹配 → **守方永远拿不到越墙能力**。
+   配置里承诺的「**守方 AI 自动获得同样能力**」在剧情攻城战里**从未生效**。
+2. **`WallPassData.Apply` 的幂等守卫使「双保险」失效**：
+   `if (_applied && mapPtr == _lastMap) return;` ⇒ postfix 里
+   `Apply(selfTeamID)` 之后的第二次 `Apply(playerTeamID)` **永远直接返回**。
+
+> **纪律**：不要用「无玩家时 0 段被写」当作预期行为 —— 那是 bug 的表象。
+> 疑似修法（待确认语义）：用 `bc.playerBattleUnit == null`（或 `!bc.havePlayer`）
+> 识别「无玩家」，此时回退到「城墙所属队伍」，并去掉/放宽 `_applied` 守卫。
+>
+> ⚠️ 构造测试时若**不**把 `worldData.Player()` 放进战斗，你复现到的是 **bug 现场**，
+> 而不是正常行为 —— 别把它当成对照组。
+>
+> ⚠️ **未验证**：`passes` 是格属性（不是按队伍存的），而 `Navigate` 只拿它当
+> **搜索深度上限**（`row × passes`）。所以把一面墙写成 15 后，它作为**中转节点**
+> 可能对**双方**都放行 —— 即「己方专用」只靠「哪些格被写」来区分。
+> 本次用 `GetMoveRangeGrids` 去测这点是**错的工具**（它是按距离取半径、非连通性），
+> 结论作废，需改步 `Navigate` / 实际路径验证。
 
 ---
 
