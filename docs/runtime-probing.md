@@ -13,6 +13,7 @@
 | 该用哪个 MCP 工具 | §7.1（工具清单 + 每个工具的行为与注意） |
 | 代码写了却不生效 | `AGENTS.md` §5 排查顺序 + 本文 §7.3 生命周期（**「补丁挂上」≠「跑过」**） |
 | 崩了 / 卡死 / 进程不退出 | §7.4（minidump → 栈回溯） |
+| 要复现某个只在特定战斗里出现的 bug | §7.1.5（**主动构造战斗**，不必手动开战） |
 
 ---
 
@@ -319,6 +320,71 @@ Log groups by prefix  (8 group(s) over 173 line(s))
 - `labelOnly`：只看有文字标签的。默认 false —— 无标签的按钮**仍是按钮**，静默丢掉会掩盖状态。
 - 每个按钮独立 try/catch：池化对象里有已销毁的，一坏一格不影响整批
   （实测扫全部 951 个，`readErrors` 为 0）。
+
+#### 7.1.5 主动构造一场战斗 —— 把「复现」变成可重复的一步 ★
+
+**问题**：很多 bug 只在特定战斗里出现（人数、地图、拥挤程度）。靠手动开战复现，
+每次都要重新走一遍剧情 → **成本高到让验证不可行**。本项目实测：为查「AI 叠人」，
+手工开战 4 次、装 6 组探针，仍未复现。
+
+**解法**：用 `PrepareBattleMap` 直接建战斗 —— 它**绕开 UI 与对话**，可以纯代码调用。
+
+##### 调用链（已实测跑通）
+
+```csharp
+// 1. 英雄池：WorldData 持有全部角色
+var gc = Resources.FindObjectsOfTypeAll<Il2Cpp.GameController>()[0];
+var wd = gc.worldData;                 // wd.HerosDict: Dictionary<int,HeroData>（实测 1208 个）
+
+// 2. 按门派取人：ForceData.ownHeros 装的是**英雄 ID**，不是 HeroData 对象
+//    （踩过：直接当 HeroData 用会每个属性都报错，因为它是 System.Int32）
+var mine   = new Il2CppSystem.Collections.Generic.List<Il2Cpp.HeroData>();
+var enemy  = new Il2CppSystem.Collections.Generic.List<Il2Cpp.HeroData>();
+foreach (var id in wd.Forces[myForceIdx].ownHeros) {
+    var h = wd.HerosDict[id];          // ID → HeroData
+    if (h != null && !h.dead && !h.inPrison && mine.Count < n) mine.Add(h);
+}
+
+// 3. 建战斗 —— 只这一个入口（32 个 PlotController.* 全汇到这里）
+battleController.PrepareBattleMap(
+    Il2Cpp.BattleType.StudyFight,      // StudyFight / HardFight / DeathFight
+    mine, enemy, "", false, false);
+// → state 立刻变 Prepare，PrepareUIPanel 渲染出参战名单
+
+// 4. 开打 —— ⚠️ 必须走按钮 onClick，直接调方法**无效**
+UnityEngine.GameObject.Find("Canvas/BattleUIPanel/PrepareUIPanel/StartBattleButton")
+    .GetComponent<UnityEngine.UI.Button>().onClick.Invoke();
+// → state 变 Fighting
+```
+
+##### ⚠️ 三个必须知道的坑
+
+1. **`battleController.StartBattleButtonClicked()` 直接调没用** —— 它 `CallerCount=0`，
+   是 Unity 事件系统的回调，不是逻辑入口。实测：直接调 state 停在 `Prepare` 不动；
+   用 `button.onClick.Invoke()` 才进 `Fighting`。**排查时别在这里绕圈。**
+2. **`ownHeros` 是 ID 列表**（`List<int>`）。`WorldData.HerosDict` 才是 `ID → HeroData`。
+3. **`PrepareBattleMap` 会改英雄状态**（血量/生死）。据实机确认：影响只进**自动存档槽**，
+   不进手动存档槽。仍建议别拿关键角色做破坏性测试。
+
+##### 为什么优于「硬改内存」
+
+它走的是**游戏自己的构造函数**，不是伪造状态。本项目真实教训：曾用 `EnterGrid` 强行
+把一个单位塞进已占用格 → 造出「两个单位同格」的孤儿状态，但**游戏自己永远不会走到那里**
+（`IsBlockedByOccupant` 会拦住）。用不可达路径证明「某路径会坏」是无效证据。
+
+##### 配套：不变量检查器
+
+构造完战斗后，判定「有没有出 bug」不看日志、不靠截图，而是**每帧校验占位不变量**：
+
+| 检查 | 含义 |
+|---|---|
+| `teams[].battleUnits` 里各单位的 `mapGrid` 是否有重复 | 两个单位同格 = 叠人 |
+| 每个 `grid.battleUnit` 的 `mapGrid` 是否指回该格 | 不一致 = 孤儿 |
+| 两个视图的单位数是否相等 | 差值 = 有单位掉了登记 |
+
+挂 `BattleController.Update` 的 postfix 每帧采样即可（**不要**在自己的循环里 `Thread.Sleep`
+—— 那会阻塞 Unity 主线程，实测把 `battleTime` 冻在 1.329）。实测记录见
+[docs/friendlynoclip.md](friendlynoclip.md)。
 
 #### `execute_csharp` 的结果分类（编译失败 / 运行时异常 / 无值）
 
