@@ -1421,9 +1421,30 @@ public class Plugin : MelonMod
         }
     }
 
-    /// <summary>取「玩家操控的队伍 ID」，失败时返回一个不会匹配任何队伍的哨兵。</summary>
+    /// <summary>
+    /// 取「玩家操控的队伍 ID」。
+    ///
+    /// <para>
+    /// ⚠️ **不能只信 <c>GetPlayerControlTeamID()</c>**：实测有一局玩家单位明确在
+    /// team 1，而该 API 与 <c>GetPlayerTeam()</c> **都返回 0**（攻方）；
+    /// 与此同时两个 team 的 <c>havePlayer</c> 都是 <c>true</c>。
+    /// 于是模组会给攻方置 <c>passes</c> —— 一面墙都不匹配，功能静默失效。
+    /// </para>
+    ///
+    /// <para>
+    /// 首选直接找「被玩家操控的单位」所在队伍（<see cref="ResolveTeamByPlayerControlUnit"/>），
+    /// 只在它拿不到时才回退到游戏 API。
+    /// </para>
+    /// </summary>
     private static int ResolveSelfTeamID()
     {
+        int byUnit = ResolveTeamByPlayerControlUnit();
+
+        if (byUnit != int.MinValue)
+        {
+            return byUnit;
+        }
+
         try
         {
             var bc = GetBattleController();
@@ -1441,9 +1462,19 @@ public class Plugin : MelonMod
         return int.MinValue;
     }
 
-    /// <summary>取「玩家所在队伍 ID」，失败时返回哨兵。</summary>
+    /// <summary>
+    /// 取「玩家所在队伍 ID」。与 <see cref="ResolveSelfTeamID"/> 同理：
+    /// 首选按「被玩家操控的单位」判定，游戏 API 只作回退。
+    /// </summary>
     private static int ResolvePlayerTeamID()
     {
+        int byUnit = ResolveTeamByPlayerControlUnit();
+
+        if (byUnit != int.MinValue)
+        {
+            return byUnit;
+        }
+
         try
         {
             var bc = GetBattleController();
@@ -1463,6 +1494,62 @@ public class Plugin : MelonMod
     }
 
     /// <summary>
+    /// 扫描各队伍的战斗单位，找出**被玩家操控的那个**（<c>BattleUnit.playerControl</c>），
+    /// 返回它所在队伍的 ID；找不到则返回 <see cref="int.MinValue"/>。
+    ///
+    /// <para>
+    /// 【为什么信这个】实测同一局：<c>GetPlayerControlTeamID()</c> = 0、
+    /// <c>GetPlayerTeam()</c> = team 0，而两个 team 的 <c>havePlayer</c> **都是 true**；
+    /// 但逐单位扫描能精确指出玩家单位在 team 1。
+    /// 它是唯一与「玩家实际在哪」一致的判据。
+    /// </para>
+    ///
+    /// <para>
+    /// 建图时刻（postfix 内）单位列表**已经**填好（实测 team1 已含玩家单位），
+    /// 所以这个判据在那个时机可用。
+    /// </para>
+    /// </summary>
+    private static int ResolveTeamByPlayerControlUnit()
+    {
+        try
+        {
+            var bc = GetBattleController();
+            var teams = bc?.teams;
+
+            if (teams == null)
+            {
+                return int.MinValue;
+            }
+
+            for (int i = 0; i < teams.Count; i++)
+            {
+                BattleTeam? team = teams[i];
+
+                if (team?.battleUnits == null)
+                {
+                    continue;
+                }
+
+                for (int j = 0; j < team.battleUnits.Count; j++)
+                {
+                    BattleUnit? unit = team.battleUnits[j];
+
+                    if (unit != null && unit.playerControl)
+                    {
+                        return team.ID;
+                    }
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Warning($"[城墙通行] 扫描玩家单位失败：{e.Message}");
+        }
+
+        return int.MinValue;
+    }
+
+    /// <summary>
     /// 本场战斗**是否真有玩家参战**。
     ///
     /// <para>
@@ -1473,16 +1560,23 @@ public class Plugin : MelonMod
     /// </para>
     ///
     /// <para>
-    /// 【为什么用 <c>havePlayer</c> 而不是 <c>playerBattleUnit</c>】
-    /// 本判据在**建图时刻**（<c>GenerateMapObjs</c> 的 postfix 内）被调用，
-    /// 那时单位还没生成 —— 实测 <c>playerBattleUnit</c> **有玩家时也是 null**。
-    /// <c>bc.havePlayer</c> 在那一刻已经正确（实测：有玩家 True / 无玩家 False）。
+    /// 【为什么不直接用游戏 API】实测：
+    /// 无玩家的剧情战斗里 <c>GetPlayerControlTeamID()</c> 与 <c>GetPlayerTeam()</c>
+    /// 都**不返回「没有」**，而是静默返回 team 0；有玩家时它们也可能返回错队伍。
+    /// 而 <c>playerBattleUnit</c> 在建图时刻**有玩家时也是 null**（单位还没生成）。
+    /// 所以真正的判据是「逐单位找 <c>playerControl</c>」。
     /// </para>
     /// </summary>
     private static bool HasPlayer()
     {
         try
         {
+            // ★ 首选：真的存在被玩家操控的单位（唯一与「玩家实际在哪」一致的判据）。
+            if (ResolveTeamByPlayerControlUnit() != int.MinValue)
+            {
+                return true;
+            }
+
             var bc = GetBattleController();
 
             if (bc == null)
@@ -1490,28 +1584,9 @@ public class Plugin : MelonMod
                 return true;   // 拿不到 controller：按「有玩家」走原路径，保持既有行为
             }
 
-            if (bc.havePlayer)
-            {
-                return true;
-            }
-
-            // 冗余判据：任一队伍标了 havePlayer 也算有玩家。
-            var teams = bc.teams;
-
-            if (teams != null)
-            {
-                for (int i = 0; i < teams.Count; i++)
-                {
-                    BattleTeam? team = teams[i];
-
-                    if (team != null && team.havePlayer)
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
+            // 回退：bc.havePlayer（实测无玩家时为 false）。
+            // ⚠️ 不要用 teams[].havePlayer —— 实测它会在**两个**队伍上都为 true。
+            return bc.havePlayer;
         }
         catch (Exception e)
         {
