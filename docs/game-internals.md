@@ -19,6 +19,7 @@
 | 音效 | 两套 UI 事件体系（`TabButton` / `Button`）最终汇聚到**同一个函数** | §1 |
 | 资源 | 资源是 **float 数组**，不是整数 —— 别强转 | §2 |
 | 角色三维 | 详情面板与战斗 UI 用**同一套字段**；缓存挂在**角色**上而控件**共用**，交错切人会显示上一个角色的值（**已复现的显示 bug**）| §4 |
+| 战斗构造 | **32 个 `PlotController.*` 入口全汇到 `BattleController.PrepareBattleMap`**；可纯代码建战斗（含指定地图尺寸、重划可行区域、随时退出）| §5 |
 | ⚠️ 陷阱 | **动手前先扫一遍 §3「常见陷阱速查」**（本节原来埋在文件中部）| §3 |
 
 ---
@@ -638,7 +639,138 @@ shownPowerBarRoot shownPower shownMaxPower shownRealMaxPower
 
 ---
 
-## 5. 记录约定
+## 5. 战斗的构造与地图生成
+
+> 实测 **2026-10-07**。调用链与字段语义**绑定当前构建**（指纹见文首）。
+
+### 5.1 唯一入口：`PrepareBattleMap`
+
+全二进制有 **32 个 `PlotController.*` 战斗入口**（劫镖 / 挑战 / 寻仇 / 比武 / 守城 / 越狱…），
+**全部汇聚到** `BattleController.PrepareBattleMap`。它**不需要 UI，可直接调用** ——
+这是给战斗做可重复测试场景的基础。
+
+```csharp
+// 1) 英雄池
+var gc = Resources.FindObjectsOfTypeAll<Il2Cpp.GameController>()[0];
+var wd = gc.worldData;              // wd.HerosDict: Dictionary<int,HeroData>（实测 1208 个）
+
+// 2) 按门派取人 —— ⚠️ ownHeros 装的是**英雄 ID**（List<int>），不是 HeroData 对象
+var mine = new Il2CppSystem.Collections.Generic.List<Il2Cpp.HeroData>();
+foreach (var id in wd.Forces[myForceIdx].ownHeros) {
+    var h = wd.HerosDict[id];       // ID → HeroData
+    if (h != null && !h.dead && !h.inPrison && mine.Count < n) mine.Add(h);
+}
+
+// 3) 建战斗（6 参重载最简单）
+b.PrepareBattleMap(Il2Cpp.BattleType.StudyFight, mine, enemy, "", false, false);
+// → battleState 立刻变 Prepare，PrepareUIPanel 渲染出参战名单
+```
+
+| 枚举 | 值 |
+|---|---|
+| `BattleType` | `StudyFight 0` / `HardFight 1` / `DeathFight 2` |
+| `BattleMapType` | `Wild 0` / `City 1` / `Indoor 2` / `Arena 3` / `AttackArea 4` |
+
+### 5.2 ⚠️ 开始战斗：必须触发按钮，直接调方法**无效**
+
+```csharp
+// ✓ 有效
+GameObject.Find("Canvas/BattleUIPanel/PrepareUIPanel/StartBattleButton")
+    .GetComponent<UnityEngine.UI.Button>().onClick.Invoke();   // → Fighting
+
+// ✗ 无效：直接调 BattleController.StartBattleButtonClicked()
+```
+
+`StartBattleButtonClicked` 的 `CallerCount = 0` —— 它是 **Unity 事件系统的回调**，
+不是逻辑入口。实测直接调它，`battleState` 停在 `Prepare` 不动。
+
+### 5.3 干净退出战斗
+
+```csharp
+b.SureGiveUpBattle();   // → state=End
+b.BattleRealEnd();      // → state=None，BattleUIPanel 清空
+```
+
+**两个都要调。** 实测只调 `SureGiveUpBattle()` 会停在 `End` / `Attacking`
+（`playingAnim=True`、`battleTime` 冻结）；补上 `BattleRealEnd()` 才真正回世界地图。
+两个都幂等，**不必判断当前状态**。
+
+游戏内的「认输」按钮有前提（手动模式 + 轮到我方才能按），但**它背后的方法没有** ——
+所以随时可退。
+
+### 5.4 指定地图尺寸
+
+`BattleMapTypeData` 的构造 `(BattleMapType, int column, int row)` 决定地图大小：
+
+```csharp
+var mtd = new Il2Cpp.BattleMapTypeData(Il2Cpp.BattleMapType.Wild, 9, 9);   // → 9x9
+b.PrepareBattleMap(StudyFight, mine, theirs, "", false, false, mtd);
+```
+
+默认 Wild 图是 **19x20**。
+
+### 5.5 建图后重划可行区域（填障碍物）
+
+`GridUnitData.gridType` 是**可写**属性（`GridType`：`None 0` / `Normal 1` / `Obstacle 2`）：
+
+```csharp
+foreach (var g in allCells)
+    if (g.column != 0 && g.column != W-1)
+        g.gridType = Il2Cpp.GridType.Obstacle;
+
+battleMapData.TidyGridList();   // ★ 必调：重建 normalGrids / obstacleGrids
+```
+
+| 约束 | 实测结果 |
+|---|---|
+| ⚠️ **顺序** | 必须在 `PrepareBattleMap` **之后**填 —— 它内部会调 `GenerateMapObjs` 重建地图，之前的改动会被丢弃 |
+| ⚠️ **`TidyGridList()` 必调** | 只改 `gridType` 不改列表会与实际不符（实测：填掉 58 格后 `normalGrids` 仍报 58） |
+| ⚠️ **不能全填** | 64/64 全障碍 → **队伍为空、战斗停住**。生成器需要 Normal 格才能放人 |
+| ✅ 只留两列 | 8 单位正常上场，战斗正常跑 |
+
+**落位规则**：默认 team0 贴 column 0、team1 贴 column max，沿行分散，**初始不重叠**。
+若一方人数**超过地图行数**，生成器会把多余的**溢到对面那列**
+（实测 14 人 / 9 行图 → 列0 放 9 个，列8 再放 5 个，与敌方同列）。
+
+### 5.6 战斗占位的两视图不变量
+
+战斗占位有**两个视图**，正常情况下一致：
+
+| 视图 | 来源 |
+|---|---|
+| A（战斗逻辑遍历） | `BattleController.teams[i].battleUnits` |
+| B（格子地图） | `BattleMapData.normalGrids` / `obstacleGrids` 里各 `GridUnitData.battleUnit` |
+
+不变量：**|A| == |B|**，且每个存活单位的 `mapGrid` 指向「`battleUnit` 指回它」的那一格。
+
+- ⚠️ **孤儿**：单位仍在 A（`mapGrid` 指向旧格），但 B 已不登记它
+  ⇒ 战斗逻辑解析它的格子会失败。
+- ⚠️ **同格**：两个单位的 `mapGrid` 指向同一格 —— 视觉上就是「两人叠在一起」。
+  注意这种形态**不会**让一格出现两个 `battleUnit`，**只查格子会漏掉** ⇒ 必须**按单位反查**。
+
+判定不依赖游戏日志，每帧采样上面三条检查即可。
+
+### 5.7 ⚠️ 副作用
+
+`PrepareBattleMap` 构造的战斗**会真的改英雄状态**（掉血 / 死亡）。
+据实机确认：影响只进**自动存档槽**，**不进手动存档槽**。仍建议别拿关键角色做破坏性测试。
+
+### 5.8 ⚠️ 让单位自动行动：直接写 `autoFight`
+
+`BattleController.SetAllAuto(true)` 实测**返回成功但 0/15 个单位被置为自动** ——
+它依赖 UI 面板状态，**不能可靠地从代码调用**。逐单位直接写字段才可靠：
+
+```csharp
+for (...) t.battleUnits[j].autoFight = true;   // 实测 15/15 生效
+```
+
+> ⚠️ **副作用陷阱**：`autoFight` 没设上时，战斗会卡在 `Attacking` + `playingAnim=True`
+> （`battleTime` 冻结）—— **看起来像模组 bug**。
+> 先确认它真的置上了，再去查目标代码（同 `AGENTS.md` 纪律 1）。
+
+---
+
+## 6. 记录约定
 
 - **只记与 mod 无关的游戏机制**（世界观、数值规则、内部系统）。
 - 需要具体地址/偏移的结论 → 仍写在这里，但**必须标注实测日期与构建指纹**（游戏一更新即失效）。

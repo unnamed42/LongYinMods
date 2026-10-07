@@ -13,7 +13,7 @@
 | 该用哪个 MCP 工具 | §7.1（工具清单 + 每个工具的行为与注意） |
 | 代码写了却不生效 | `AGENTS.md` §5 排查顺序 + 本文 §7.3 生命周期（**「补丁挂上」≠「跑过」**） |
 | 崩了 / 卡死 / 进程不退出 | §7.4（minidump → 栈回溯） |
-| 要复现某个只在特定战斗里出现的 bug | §7.1.5（**主动构造战斗**，不必手动开战） |
+| 要复现某个只在特定战斗里出现的 bug | [game-internals.md](game-internals.md) §5（**主动构造战斗**，不必手动开战） |
 
 ---
 
@@ -321,118 +321,18 @@ Log groups by prefix  (8 group(s) over 173 line(s))
 - 每个按钮独立 try/catch：池化对象里有已销毁的，一坏一格不影响整批
   （实测扫全部 951 个，`readErrors` 为 0）。
 
-#### 7.1.5 主动构造一场战斗 —— 把「复现」变成可重复的一步 ★
+#### 7.1.5 主动构造战斗场景（机制在 game-internals §5）
 
-**问题**：很多 bug 只在特定战斗里出现（人数、地图、拥挤程度）。靠手动开战复现，
-每次都要重新走一遍剧情 → **成本高到让验证不可行**。本项目实测：为查「AI 叠人」，
-手工开战 4 次、装 6 组探针，仍未复现。
+> **要主动构造一场战斗（人数 / 地图 / 障碍物 / 退出）看**
+> [docs/game-internals.md](game-internals.md) §5 —— 那是**游戏机制**（入口函数、字段语义、
+> 落位规则、**占位不变量**），会随游戏构建变化，所以不在本文件重复。
+>
+> 本条只留一条**工具层面的纪律**：
+>
+> ⚠️ `battleController.SetAllAuto(true)` 实测**返回成功但一个单位都没置上**（依赖 UI 面板状态）。
+> 效果没达成时，战斗会卡在 `Attacking` + `playingAnim=True`，**看起来像模组 bug**。
+> 先确认预期效果真的生效，再去查目标代码（同 `AGENTS.md` 纪律 1）。
 
-**解法**：用 `PrepareBattleMap` 直接建战斗 —— 它**绕开 UI 与对话**，可以纯代码调用。
-
-##### 调用链（已实测跑通）
-
-```csharp
-// 1. 英雄池：WorldData 持有全部角色
-var gc = Resources.FindObjectsOfTypeAll<Il2Cpp.GameController>()[0];
-var wd = gc.worldData;                 // wd.HerosDict: Dictionary<int,HeroData>（实测 1208 个）
-
-// 2. 按门派取人：ForceData.ownHeros 装的是**英雄 ID**，不是 HeroData 对象
-//    （踩过：直接当 HeroData 用会每个属性都报错，因为它是 System.Int32）
-var mine   = new Il2CppSystem.Collections.Generic.List<Il2Cpp.HeroData>();
-var enemy  = new Il2CppSystem.Collections.Generic.List<Il2Cpp.HeroData>();
-foreach (var id in wd.Forces[myForceIdx].ownHeros) {
-    var h = wd.HerosDict[id];          // ID → HeroData
-    if (h != null && !h.dead && !h.inPrison && mine.Count < n) mine.Add(h);
-}
-
-// 3. 建战斗 —— 只这一个入口（32 个 PlotController.* 全汇到这里）
-battleController.PrepareBattleMap(
-    Il2Cpp.BattleType.StudyFight,      // StudyFight / HardFight / DeathFight
-    mine, enemy, "", false, false);
-// → state 立刻变 Prepare，PrepareUIPanel 渲染出参战名单
-
-// 4. 开打 —— ⚠️ 必须走按钮 onClick，直接调方法**无效**
-UnityEngine.GameObject.Find("Canvas/BattleUIPanel/PrepareUIPanel/StartBattleButton")
-    .GetComponent<UnityEngine.UI.Button>().onClick.Invoke();
-// → state 变 Fighting
-```
-
-##### ⚠️ 三个必须知道的坑
-
-1. **`battleController.StartBattleButtonClicked()` 直接调没用** —— 它 `CallerCount=0`，
-   是 Unity 事件系统的回调，不是逻辑入口。实测：直接调 state 停在 `Prepare` 不动；
-   用 `button.onClick.Invoke()` 才进 `Fighting`。**排查时别在这里绕圈。**
-2. **`ownHeros` 是 ID 列表**（`List<int>`）。`WorldData.HerosDict` 才是 `ID → HeroData`。
-3. **`PrepareBattleMap` 会改英雄状态**（血量/生死）。据实机确认：影响只进**自动存档槽**，
-   不进手动存档槽。仍建议别拿关键角色做破坏性测试。
-
-##### 为什么优于「硬改内存」
-
-它走的是**游戏自己的构造函数**，不是伪造状态。本项目真实教训：曾用 `EnterGrid` 强行
-把一个单位塞进已占用格 → 造出「两个单位同格」的孤儿状态，但**游戏自己永远不会走到那里**
-（`IsBlockedByOccupant` 会拦住）。用不可达路径证明「某路径会坏」是无效证据。
-
-##### 配套：不变量检查器
-
-构造完战斗后，判定「有没有出 bug」不看日志、不靠截图，而是**每帧校验占位不变量**：
-
-| 检查 | 含义 |
-|---|---|
-| `teams[].battleUnits` 里各单位的 `mapGrid` 是否有重复 | 两个单位同格 = 叠人 |
-| 每个 `grid.battleUnit` 的 `mapGrid` 是否指回该格 | 不一致 = 孤儿 |
-| 两个视图的单位数是否相等 | 差值 = 有单位掉了登记 |
-
-挂 `BattleController.Update` 的 postfix 每帧采样即可（**不要**在自己的循环里 `Thread.Sleep`
-—— 那会阻塞 Unity 主线程，实测把 `battleTime` 冻在 1.329）。实测记录见
-[docs/friendlynoclip.md](friendlynoclip.md)。
-
-##### 7.1.5.1 缩小地图与填障碍物
-
-地图尺寸可以在建图时就指定：
-
-```csharp
-var mtd = new Il2Cpp.BattleMapTypeData(Il2Cpp.BattleMapType.Wild, 9, 9); // col, row
-b.PrepareBattleMap(StudyFight, mine, theirs, "", false, false, mtd);   // → 9x9（默认 19x20）
-```
-
-建图**之后**还能重划可行区域（做拥挤场景用）：
-
-```csharp
-foreach (var g in allCells)
-    if (g.column != 0 && g.column != W-1)
-        g.gridType = Il2Cpp.GridType.Obstacle;   // None=0 / Normal=1 / Obstacle=2
-battleMapData.TidyGridList();                    // ★ 必调，否则两个列表与实际不符
-```
-
-| 约束 | 实测结果 |
-|---|---|
-| ⚠️ **顺序** | 填障碍**必须在 `PrepareBattleMap` 之后** —— 它内部会调 `GenerateMapObjs` 重建地图，之前的改动会被丢掉 |
-| ⚠️ **不能全填** | 64/64 全障 → **队伍为空、战斗停住**。生成器需要 Normal 格才能放人 |
-| ✅ 只留两列 | 8 单位正常上场，战斗正常跑 |
-| 人数溢出 | 一方人数 > 地图行数时，生成器会把多出来的人**溢到对面那列**（实测 14 人在 9 行图上 → 列0 放 9 个，列8 再放 5 个） |
-
-##### 7.1.5.2 随时干净退出战斗
-
-```csharp
-battleController.SureGiveUpBattle();   // → state=End
-battleController.BattleRealEnd();      // → state=None，UI 清空
-```
-
-**两个都要调。** 实测只调 `SureGiveUpBattle()` 会停在 `End`/`Attacking`
-（`playingAnim=True`、`battleTime` 冻结）；补上 `BattleRealEnd()` 才真正回世界地图。
-两个都是幂等的，**不必判断当前状态**。
-
-##### 7.1.5.3 ⚠️ `SetAllAuto` 不可靠 —— 直接写 `autoFight`
-
-`battleController.SetAllAuto(true)` 实测**返回成功但 0/15 个单位被置为自动**（依赖 UI 面板状态）。
-可靠做法是逐单位直接写：
-
-```csharp
-for (...) t.battleUnits[j].autoFight = true;   // 实测 15/15 生效
-```
-
-> ⚠️ **副作用陷阱**：`autoFight` 没设上时，战斗会卡在 `Attacking` + `playingAnim=True`，
-> 看起来像模组 bug。**先确认 `autoFight` 真的置上了，再去查模组**（纪律 1 的同类）。
 #### `execute_csharp` 的结果分类（编译失败 / 运行时异常 / 无值）
 
 **编译失败 / 运行时异常 / 无值，这三者必须能分辨** —— 混在一起会让人在**正确的代码**
