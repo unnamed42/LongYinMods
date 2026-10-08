@@ -225,9 +225,9 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 
 ---
 
-## 4. 六条最贵重的纪律
+## 4. 七条最贵重的纪律
 
-**只有六条**（细节在专题文档里）。**跨游戏、跨任务都成立**：
+**只有七条**（细节在专题文档里）。**跨游戏、跨任务都成立**：
 
 1. **改完代码先确认产物与时机**，再去读代码 —— 否则会在正确的代码里找不存在的 bug。
    见 §3.2（md5）与 §3.2.1（冷启动）。
@@ -251,6 +251,14 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 6. **工具由用户安装，AI 不得自行下载或安装**（含装到工作区内）。
    判断标准是**意图**：当前环境里原本不存在、需要你额外获取才能用的，就请用户装。
    见 §6。
+
+7. **针对「官方也可能自己修」的 bug：补丁必须按构建指纹门控 + 挂载失败优雅降级。**
+   官方持源码，可以随手给方法**加参数、加新方法**；我们只能在**固定签名**上 patch ——
+   签名一变，补丁就静默失效或干脆挂不上（前例见 [docs/game-internals.md](docs/game-internals.md) §2.2a
+   的 `GetForceName`）。所以：① 用 `GameAssembly.dll` 的 md5 做 **AllowList（fail closed）**；
+   ② 目标缺失只记日志、**绝不让游戏崩**；③ ⚠️ **默认参数型的签名变化从 `[Calls]` 看不出来**
+   （`f(go)` 与 `f(go,true)` 编译出同一个签名）—— 判定“官方修了没有”只能靠**活进程行为探针**。
+   见 [docs/herovitalsfix.md](docs/herovitalsfix.md) §3 / §7。
 
 ---
 
@@ -327,7 +335,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 |---|---|---|
 | FriendlyNoclip | 战斗格子地图允许穿越友方 | [docs/friendlynoclip.md](docs/friendlynoclip.md) |
 | ShiftClickUpgrade | Shift+单击直接升级建筑 | [docs/shiftclickupgrade.md](docs/shiftclickupgrade.md) |
-| HeroVitalsFix | 切人后三维（生命/内力/体力）显示不刷新。**构建指纹门控**，游戏更新即自停 | [docs/herovitalsfix.md](docs/herovitalsfix.md) |
+| HeroVitalsFix | 切人后三维（生命/内力/体力）显示不刷新 —— ✅ **已被官方修复取代**（2026-10-08）；保留作为「**按指纹门控发布** + **验证官方修复**」的方法论 | [docs/herovitalsfix.md](docs/herovitalsfix.md) |
 | ForceOverflowDividend | （**第三方 mod 修复**）门派资源溢出折现 | [docs/forceoverflowdividend.md](docs/forceoverflowdividend.md) |
 | WuMingPerformanceFix | （**第三方 mod 修复**）**游戏退出时卡死 / 进程不退出** | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
 

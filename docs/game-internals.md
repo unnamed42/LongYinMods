@@ -1,7 +1,10 @@
 # 游戏机制与系统（非 mod 专属的发现）
 
 > ⚠️ **本文件的地址、字段偏移、调用链结论绑定到当前游戏构建**
-> （`GameAssembly.dll` 33661952 字节 / `global-metadata.dat` 7959028 字节 / IL2CPP metadata **v27** / Unity 2020.3.48f1c1）。
+> 本节跨**两个构建**，结论分别标注：
+> `ea039aad075f14316a07016ba3625036`（GameAssembly 33661952 / metadata 7959028）→ 三维 bug **存在**；
+> `ac0ec1a3064d0b82f9e7b5adda628232`（33669120 / 7960432）→ 官方**已修**（§4.7）。
+> IL2CPP metadata **v27** / Unity 2020.3.48f1c1。
 > **游戏一更新即失效**，需按 `AGENTS.md` §4 的流程重新推导。
 >
 > 本文件收录**与 mod 具体功能无关、但以后做别的 mod 会复用到**的游戏内部机制。
@@ -18,7 +21,7 @@
 |---|---|---|
 | 音效 | 两套 UI 事件体系（`TabButton` / `Button`）最终汇聚到**同一个函数** | §1 |
 | 资源 | 资源是 **float 数组**，不是整数 —— 别强转 | §2 |
-| 角色三维 | 详情面板与战斗 UI 用**同一套字段**；缓存挂在**角色**上而控件**共用**，交错切人会显示上一个角色的值（**已复现的显示 bug**）| §4 |
+| 角色三维 | 详情面板与战斗 UI 用**同一套字段**；缓存挂在**角色**上而控件**共用** —— 交错切人曾显示上一个角色的值（旧构建的 bug，**官方已于 2026-10-08 修复**，机制见 §4.7）| §4 |
 | 战斗构造 | **32 个 `PlotController.*` 入口全汇到 `BattleController.PrepareBattleMap`**；可纯代码建战斗（含指定地图尺寸、重划可行区域、随时退出）| §5 |
 | ⚠️ 陷阱 | **动手前先扫一遍 §3「常见陷阱速查」**（本节原来埋在文件中部）| §3 |
 
@@ -463,7 +466,7 @@ if (bd.buildTimeLeft > 0 || bd.upgradeTimeLeft > 0
 | 裸内存地址（CE 找到的）| **每次读档都会变**，不可当锚点 | §2.1 |
 | 资源是 float | 别强转 int | §2.1 |
 | 游戏更新改了**方法签名** | 旧编译的 mod 抛 `MissingMethodException`；**方法内**的 `catch` 拦不住（JIT 期抛出），要改反射 | §2.2a |
-| 缓存字段挂在**角色**上、控件却**共用** | 交错切人时「第二次回到 A」会跳过刷新，显示上一个角色的值 | §4.4 |
+| 缓存字段挂在**角色**上、控件却**共用** | 交错切人时「第二次回到 A」会跳过刷新，显示上一个角色的值。修法是**调用点传 `force:true`**（§4.7）| §4.4 |
 | 手工改写被守卫读取的缓存字段做实验 | 会亲手满足「跳过」条件，得出反向结论 | §4.6 |
 
 ### 3.1 资源（Asset）加载
@@ -489,7 +492,9 @@ if (bd.buildTimeLeft > 0 || bd.upgradeTimeLeft > 0
 ---
 ## 4. 角色三维（生命 / 内力 / 体力）的显示与刷新缓存
 
-> 实测日期 **2026-10-07**，构建指纹同上。本节包含**当前版本一个已复现的显示 bug**（§4.4）。
+> 看结论前先认指纹：
+> - `ea039aad…`（2026-10-07）—— 三个 setter **无** `force` 参数，该显示 bug **存在**（§4.4）
+> - `ac0ec1a3…`（2026-10-08）—— 新增 `force` 参数 + `InvalidateBarCache()`，**bug 已修**（§4.7）
 
 ### 4.1 数值、控件与格式
 
@@ -521,7 +526,29 @@ if (bd.buildTimeLeft > 0 || bd.upgradeTimeLeft > 0
 
 ### 4.2 谁在刷新它
 
-三条 bar 的写入口都是 `HeroData` 上的公开方法：`SetHpBar(GameObject)` / `SetMpBar` / `SetPowerBar`。
+三条 bar 的写入口都是 `HeroData` 上的公开方法。
+
+**`ea039aad…`（有 bug 那版）**：
+
+```
+SetHpBar(GameObject hpBarRoot)
+SetMpBar(GameObject mpBarRoot)
+SetPowerBar(GameObject powerBarRoot)
+```
+
+**`ac0ec1a3…`（2026-10-08 修复版）**：三个都多一个布尔开关，并新增一个失效方法：
+
+```
+SetHpBar(GameObject hpBarRoot, bool force = false)
+SetMpBar(GameObject mpBarRoot, bool force = false)
+SetPowerBar(GameObject powerBarRoot, bool force = false)
+HeroData.InvalidateBarCache()          // 清掉三个 shown*BarRoot；唯一调用者 HeroIconController.Init
+```
+
+> ⚠️ `bool force = false` 是**默认参数**：源码里 `SetHpBar(go)` 与 `SetHpBar(go, true)` 编译出的
+> **签名完全相同** ⇒ `[Calls]` / `MemberParameters` **看不出调用点传了什么**。
+> 要判「传没传 `force`」只能**活进程实测**（§4.7 的做法）或反汇编调用点。
+
 `GameObject` 参数就是上面那条 bar 的**根节点**。
 
 调用图（`tools/find_callers` 实测；这些是**推断边**，见 [`find-callers.md`](find-callers.md)）：
@@ -572,16 +599,22 @@ shownPowerBarRoot shownPower shownMaxPower shownRealMaxPower
 | `shownXBarRoot == null` | 写 | 写 | 写 |
 | **同 root、同数值** | **跳过** | **跳过** | **跳过** |
 | 同 root、**数值变化** | 写 | 写 | 写 |
+| 同 root、同数值，但传 `force:true` | 写 | 写 | 写 |
+
+（最后一行只存在于 `ac0ec1a3…`；`ea039aad…` 没有 `force` 参数，见 §4.7。）
 
 即 `root == shownXBarRoot && cur == shownX && max == shownMaxX` ⇒ 直接 return。
 
 > 📌 缓存存在的意义看 caller 就明白：`SetHpBar` 在 `HudController.Update` 里**每帧**被调，
 > 无条件写 = 每帧重排文本 + `LTLocalization.SetText`。
 
-> ⚠️ **全场没有任何一处代码清空这些字段**：`grep -l 'shown*BarRoot'` 只命中 `HeroData.cs` 自己，
+> ⚠️ **`ea039aad…` 上全场没有任何一处代码清空这些字段**：`grep -l 'shown*BarRoot'` 只命中 `HeroData.cs` 自己，
 > 即**没有失效机制**。旁证：`BattleController` 上是同一套缓存模式（`uiLastPostureValues`、
 > `uiLastExternalInjury`…），那边配了时间兜底 `ActiveUIStateFallbackInterval` + `uiLastStateRefreshTime`，
 > 而 `ResetActiveUIValueCache()` 这个看名字就是「主动失效」的方法 **0 个调用者**。
+>
+> 📌 `ac0ec1a3…` 补上了这个缺口：新增 `InvalidateBarCache()`（唯一调用者 `HeroIconController.Init`）
+> 与三个 setter 的 `force` 参数——但修复实际靠的是 `force`，`InvalidateBarCache` 不覆盖详情面板路径（§4.7）。
 
 ### 4.4 ⚠️ 已知 bug：缓存挂在**角色**上，控件却是**共用**的
 
@@ -607,8 +640,11 @@ shownPowerBarRoot shownPower shownMaxPower shownRealMaxPower
 |---|---|---|---|
 | 白云天 | 3975（= 陆良宫 `hp=3975.26`）❌ | 5311（= 陆良宫 `mana=5311.42`）❌ | 193（= 白云天 `power=192.5`）✅ |
 
-> 📌 **推测（未证实）**：该 bug 疑似**本次更新引入** —— 猜测他们把「每角色一套 bar」改成了
-> 「共用一套 bar + 记账缓存」。**本机没有旧版 DLL（Steam 随时更新）、无法对照，故仅作推测。**
+> ✅ **已修复**（`ac0ec1a3…`，2026-10-08）：三条 bar 在详情面板与战斗里都跟随新选中的角色。
+> 修法、实测判据与「怎么排除干扰」见 §4.7。
+>
+> 📌 **关于“是哪次更新引入的”**：`ea039aad…` 上有 bug、`ac0ec1a3…` 上已修，这条**已确证**；
+> 但“引入于哪一次更新”仍无对照（本机没有更早的 DLL，Steam 随时更新），不再推测。
 
 ### 4.5 怎么判断「官方是否已修」
 
@@ -619,9 +655,17 @@ shownPowerBarRoot shownPower shownMaxPower shownRealMaxPower
 | 结构 2 | `SetPowerBar` 等是否还在、签名是否变（签名变则旧 mod 抛 `MissingMethodException`，见 §2.2a） | 中 |
 | 结构 3 | `ResetActiveUIValueCache()` 是否开始有调用者 | 低（易误判） |
 
-探针可以机械化：`execute_csharp` 里用 `HeroDetailTabController.OnClick()`（或战斗里的
-`BattleController.RefreshActiveUnitUI()`）驱动**真实路径**，前后各读一次 bar 文本即可 ——
-**前后读数必须在同一次调用内完成**（面板会自己重建，同类问题见 §2.4d）。
+探针可以机械化：`execute_csharp` 里用 `HeroDetailTabController.OnClick()` 驱动**真实路径**，
+前后各读一次 bar 文本即可 —— **前后读数必须在同一次调用内完成**（面板会自己重建，同类问题见 §2.4d）。
+
+**本方法已经在真事上跑过一遍**（2026-10-08，§4.7），从中学到三条：
+
+- ⚠️ **光看“现象变对了”不够**：数值变化（buff / 受伤）会造成**守卫失配而自愈**，
+  看起来像“修好了”其实只是那一次恰好跳过不成立。必须构造成**守卫必然命中**的状态再看是否重画。
+- ⚠️ **`BattleController.RefreshActiveUnitUI()` 不是切换路径**：它是**周期刷新**，实测走 `force=false`；
+  直接调它只能测“缓存命中会不会写”，**不能**代替真实切人。
+- ⚠️ **点击已经选中的 tab 是空操作**（`OnClick` 不会重画）—— 探针必须**真的换人**，
+  否则会把“没反应”误读成“没修”。
 
 > ⚠️ **不建议做「启动时自动自检」**：探针必须真的切一次角色，会动 UI / 游戏状态，
 > 侵入性比 bug 本身还大；而且官方若只改 native 守卫，从 metadata 读不出语义。
@@ -636,6 +680,42 @@ shownPowerBarRoot shownPower shownMaxPower shownRealMaxPower
 - `Resources.FindObjectsOfTypeAll` **包含 inactive** 对象；面板关掉后 `nowShowHero` / `mainShowHero` 会变 `null`。
 - 判断一个控件「到底写没写」：先写入哨兵字符串（并同步 `SimpleDetailText.text`），调用目标方法后回读；
   必要时再做一次全场景文本 diff，以区分「没写」和「写到别处去了」。
+
+### 4.7 官方修复实录（2026-10-08 更新，`ac0ec1a3…`）
+
+**修复方案**（新旧 cpp2il 对比 + 活进程实测）：
+
+```
+新增：HeroData.InvalidateBarCache()            // 清掉三个 shown*BarRoot（置 null），shown* 数值留着
+变更：SetHpBar / SetMpBar / SetPowerBar         都多一个 bool force = false
+```
+
+- 12 个 `shown*` 字段**一字未动** —— 数据布局没改
+- 三个 setter 的**调用者集合也没变** —— 改的是**实参**（传 `force:true`），
+  所以 `[Calls]` / `MemberParameters` 看不出调用点传了什么（见 §4.2 的警告）
+- `InvalidateBarCache()` 唯一调用者是 `HeroIconController.Init`
+
+**实测语义**（受控实验，判别“改守卫”还是“调用点强制”）：
+
+| 实验 | 结果 | 结论 |
+|---|---|---|
+| 缓存命中 → `SetPowerBar(W, false)` | 未写 | **老守卫语义没变**（§4.3 那张表仍成立）|
+| 缓存命中 → `SetPowerBar(W, true)` | 写了 | `force` 绕过缓存 |
+| 缓存命中 → `SetPowerBar(W)`（默认）| 未写 | 默认仍 `false` |
+| `InvalidateBarCache()` | 三个 `shown*BarRoot` → `null` | 语义 = 「忘掉我画在哪些控件上」|
+| 缓存命中 → 手动调 `RefreshActiveUnitUI()` | Power **没写** | 周期刷新仍走 `force=false`，**每帧优化保住了** |
+
+**所以修复是分层的**：切人那一刻传 `force:true`（保证换人必重画），周期刷新继续用缓存跳过。
+
+**两条路径都验证通过**：
+
+| 路径 | 方法 | 结果 |
+|---|---|---|
+| 详情面板 | A→B→A，且 B 的缓存始终命中 | 三项全部跟随 ✅ |
+| 战斗 | 给全员预置「缓存 = 战场控件 + 自身当前值」的陷阱，再推进回合 | 两次切换都跟随新上场角色 ✅ |
+
+> 验证的完整过程（怎么排除补丁干扰、怎么应对“回合制不能即时切人”）见
+> [`herovitalsfix.md`](herovitalsfix.md) §7；本次踩到的坑（默认参数导致调用点看不出来）已入 §4.2。
 
 ---
 
