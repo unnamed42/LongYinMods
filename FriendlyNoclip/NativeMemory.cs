@@ -87,6 +87,253 @@ internal static class NativeMemory
     }
 
     /// <summary>
+    /// 把运行时地址换算回静态 VA（imagebase <c>0x180000000</c>）。
+    /// **只用于日志与文档对照** —— 判定与寻址一律用运行时地址。
+    /// </summary>
+    internal static ulong RuntimeToStaticVa(IntPtr address)
+    {
+        if (_moduleBase == IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        return (ulong)address.ToInt64() - (ulong)_moduleBase.ToInt64() + PreferredImageBase;
+    }
+
+    /// <summary>
+    /// 用 PE 的 <c>.pdata</c>（x64 异常目录）查 <paramref name="inside"/> 所在函数的 <c>[start, end)</c>。
+    ///
+    /// <para>
+    /// 【为什么需要它】要按指令形态在函数体里扫描，就必须知道**函数在哪结束** ——
+    /// IL2CPP 不提供函数长度，但 x64 PE 的 <c>.pdata</c> 里每个 <c>RUNTIME_FUNCTION</c>
+    /// 都带 <c>[BeginAddress, EndAddress)</c>，且规范保证按 <c>BeginAddress</c> 升序、互不重叠，
+    /// 所以可以二分。没有它就只能扫固定长度 —— 那容易串进相邻函数，
+    /// 把「形态必须唯一命中」这条自检弄脏。
+    /// </para>
+    ///
+    /// <para>读的是**已加载映像**的 PE 头（不是磁盘文件），所以与运行时布局完全一致。</para>
+    /// </summary>
+    internal static bool TryGetFunctionBounds(IntPtr inside, out IntPtr start, out IntPtr end)
+    {
+        start = IntPtr.Zero;
+        end = IntPtr.Zero;
+
+        if (_moduleBase == IntPtr.Zero || inside == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            long imageBase = _moduleBase.ToInt64();
+            long target = inside.ToInt64();
+
+            if (target < imageBase || target >= imageBase + _moduleSize)
+            {
+                return false;
+            }
+
+            if (!TryGetPdataTable(out IntPtr table, out int count))
+            {
+                return false;
+            }
+
+            // ---- RUNTIME_FUNCTION[]（12 字节/项）按 BeginAddress 升序 → 二分 ----
+            uint key = (uint)(target - imageBase);
+
+
+            int lo = 0;
+            int hi = count - 1;
+
+            while (lo <= hi)
+            {
+                int mid = lo + ((hi - lo) / 2);
+                IntPtr entry = (IntPtr)(table.ToInt64() + (mid * 12));
+
+                uint begin = (uint)Marshal.ReadInt32(entry);
+                uint stop = (uint)Marshal.ReadInt32(entry, 4);
+
+                if (key < begin)
+                {
+                    hi = mid - 1;
+                }
+                else if (key >= stop)
+                {
+                    lo = mid + 1;
+                }
+                else
+                {
+                    start = (IntPtr)(imageBase + begin);
+                    end = (IntPtr)(imageBase + stop);
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning($"读取 .pdata 失败：{ex.Message}");
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 取 <paramref name="inside"/> 所在函数在 <c>.pdata</c> 里的**下一个相邻函数**起点。
+    ///
+    /// <para>
+    /// 【为什么需要】IL2CPP 会给「声明类的静态构造还没跑」的方法生成一个 **class-init wrapper**：
+    /// <c>Il2CppMethodInfo.methodPointer</c> 指向 wrapper，而 wrapper 做完类初始化后
+    /// **顺序落入**真正的函数体 —— 两者是 <c>.pdata</c> 里**首尾相接的两条函数记录**。
+    ///
+    /// 本项目 2026-10-09 实机现场：<c>MapNavigator.Navigate</c> 的 methodPointer =
+    /// <c>0x180a52b40</c>（wrapper），真身 = <c>0x180a52c2e</c>（紧邻的下一个函数）。
+    /// 当时「扫描 methodPointer 指向的函数」因此一处都匹配不到。
+    /// </para>
+    /// </summary>
+    internal static bool TryGetNextFunctionStart(IntPtr inside, out IntPtr next)
+    {
+        next = IntPtr.Zero;
+
+        if (_moduleBase == IntPtr.Zero || inside == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            long imageBase = _moduleBase.ToInt64();
+            long target = inside.ToInt64();
+
+            if (target < imageBase || target >= imageBase + _moduleSize)
+            {
+                return false;
+            }
+
+            if (!TryGetPdataTable(out IntPtr table, out int count))
+            {
+                return false;
+            }
+
+            uint key = (uint)(target - imageBase);
+            int lo = 0;
+            int hi = count - 1;
+
+            while (lo <= hi)
+            {
+                int mid = lo + ((hi - lo) / 2);
+                IntPtr record = (IntPtr)(table.ToInt64() + (mid * 12));
+
+                uint begin = (uint)Marshal.ReadInt32(record);
+                uint stop = (uint)Marshal.ReadInt32(record, 4);
+
+                if (key < begin)
+                {
+                    hi = mid - 1;
+                }
+                else if (key >= stop)
+                {
+                    lo = mid + 1;
+                }
+                else
+                {
+                    if (mid + 1 >= count)
+                    {
+                        return false;
+                    }
+
+                    IntPtr following = (IntPtr)(table.ToInt64() + ((mid + 1) * 12));
+                    uint nextBegin = (uint)Marshal.ReadInt32(following);
+
+                    // 只有**首尾相接**才算「顺序落入」的延续。
+                    if (nextBegin != stop)
+                    {
+                        return false;
+                    }
+
+                    next = (IntPtr)(imageBase + nextBegin);
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning($"读取 .pdata（下一个函数）失败：{ex.Message}");
+        }
+
+        return false;
+    }
+
+    /// <summary>定位 <c>.pdata</c> 表：返回表首地址与 <c>RUNTIME_FUNCTION</c> 条数。</summary>
+    private static bool TryGetPdataTable(out IntPtr table, out int count)
+    {
+        table = IntPtr.Zero;
+        count = 0;
+
+        if (_moduleBase == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        long imageBase = _moduleBase.ToInt64();
+
+        // ---- PE 头 → 节表 ----
+        int peOffset = Marshal.ReadInt32(_moduleBase, 0x3C);
+        IntPtr pe = (IntPtr)(imageBase + peOffset);
+
+        if (Marshal.ReadInt32(pe) != 0x0000_4550) // "PE\0\0"
+        {
+            return false;
+        }
+
+        short sectionCount = Marshal.ReadInt16(pe, 6);
+        short optionalHeaderSize = Marshal.ReadInt16(pe, 20);
+        IntPtr section = (IntPtr)(pe.ToInt64() + 24 + optionalHeaderSize);
+
+        int pdataRva = 0;
+        int pdataSize = 0;
+
+        for (int i = 0; i < sectionCount; i++)
+        {
+            IntPtr header = (IntPtr)(section.ToInt64() + (i * 40));
+
+            if (ReadSectionName(header) == ".pdata")
+            {
+                pdataSize = Marshal.ReadInt32(header, 8);   // VirtualSize
+                pdataRva = Marshal.ReadInt32(header, 12);   // VirtualAddress
+                break;
+            }
+        }
+
+        if (pdataRva == 0 || pdataSize < 12)
+        {
+            return false;
+        }
+
+        table = (IntPtr)(imageBase + pdataRva);
+        count = pdataSize / 12;
+        return true;
+    }
+
+    private static string ReadSectionName(IntPtr header)
+    {
+        var sb = new System.Text.StringBuilder(8);
+
+        for (int i = 0; i < 8; i++)
+        {
+            byte b = Marshal.ReadByte(header, i);
+
+            if (b == 0)
+            {
+                break;
+            }
+
+            sb.Append((char)b);
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// 在模块内按字节模式扫描。返回首个匹配的运行时地址，未找到返回 <see cref="IntPtr.Zero"/>。
     /// </summary>
     /// <param name="pattern">字节模式。</param>

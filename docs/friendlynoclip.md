@@ -1,12 +1,15 @@
 # FriendlyNoclip — 战斗格子地图穿越友方
 
-> ⚠️ **本文件的地址、偏移、metadata token、调用链结论全部绑定到当前游戏构建**
-> （`GameAssembly.dll` 33661952 字节 / `global-metadata.dat` 7959028 字节 / IL2CPP metadata **v27** / Unity 2020.3.48f1c1）。
-> **游戏一更新即失效**，需按 `AGENTS.md` §4 的流程重新推导。
+> ⚠️ **本文件的地址、偏移、metadata token、调用链结论全部绑定到「写下它们时的那个构建」**
+> （最近一次核对：2026-10-09，`GameAssembly.dll` 33669120 字节 / md5 `ac0ec1a3…` /
+> `global-metadata.dat` 7960432 字节 / IL2CPP metadata **v27** / Unity 2020.3.48f1c1）。
+> **游戏一更新即失效** —— 但两个原生 detour 的**落点现在由运行时发现**
+> （§2.2h），所以「地址失效」不再等于「功能失效」。
 >
 > 通用工具用法见 `AGENTS.md`，不重复。
 
-**状态**：✅ **两个功能均已实机确认可用**
+**状态**：✅ **两个功能均已实机确认可用**；2026-10-09 游戏更新后，原生 detour 已改成**运行时定位**并在新构建上实机确认安装成功（§2.2h）
+
 
 - **穿友方**（用户 m01137 确认）
 - **穿越己方城墙**（用户 m-confirmed：「已达成穿越城墙的效果」）
@@ -185,8 +188,9 @@ Plugin.LogInfo(() => $"[穿越] EnterGrid 目标格(r{row},c{col}) ...");
 
 **为什么改这里**：`MapNavigator` 同时服务「范围高亮」和「点击寻路」，**只改一处不会出现「格子亮了却走不过去」的分裂**。
 
-`FriendlyNoclip/FriendlyPassHook.cs` 在 `0x180a8d929` 处装 detour，比较 `selfTeamID`（`[rsp+0xd8]`）与 `g.battleUnit.battleTeam.ID`，**同队放行、异队跳过**。
-hook 点常量：`VaHookSite = 0x180A8D929`、`VaSkip = 0x180A8DA6B`、`VaPass = 0x180A8D92F`。
+`FriendlyNoclip/FriendlyPassHook.cs` 在这条 `jne` 上装 detour，比较 `selfTeamID`（`[rsp+0xd8]`）与 `g.battleUnit.battleTeam.ID`，**同队放行、异队跳过**。
+> ⚠️ **上表的地址已随 2026-10-09 的更新失效**，现在的落点、`skip`/`pass`、字段偏移与栈槽
+> 全部由运行时发现 —— 见 **§2.2h**。上表只用于读懂这段代码的**形态**。
 
 ### ★★ 修正（2026-10）：`FriendlyPassHook` 的出口也必须是 `0x180a8d92f`，不能是 `0x180a8d963`
 
@@ -237,7 +241,7 @@ hook 点常量：`VaHookSite = 0x180A8D929`、`VaSkip = 0x180A8DA6B`、`VaPass =
 0x180a8d8a9  test rax, rax
 0x180a8d8ac  je   0x180a8da6b          ; g == null          -> skip
 0x180a8d8b2  cmp  dword [rax+0x14], 2   ; g.gridType == Obstacle ?
-0x180a8d8b6  je   0x180a8da6b          ; ★ 本 hook 点：障碍格一律 skip
+0x180a8d8b6  je   0x180a8da6b          ; ★ 本 hook 点：障碍格一律 skip（地址已过期，见 §2.2h）
 0x180a8d8bc  ...                        ; 非障碍格：继续原逻辑（fall-through）
 ```
 
@@ -707,6 +711,142 @@ AI 在同一处反复尝试。
 - **当前版本可直接替代发布版** —— 除了这个修复，还多了城墙禁停、
   不可停留于占用格、损毁城墙视为空地、日志门控等。
 
+### 2.2h ★ 2026-10-09 游戏更新：从「写死地址」改为「运行时定位」
+
+**事故**：游戏更新后，两个 native detour 全部**静默失效**（只剩 WARNING）：
+
+```
+[WARNING] [原生 detour] 0x…d929 落点校验失败，拒绝安装：落点不是 6 字节 jcc rel32。
+          （实际：e8 d2 1e d9 00 4c，原始：0f 85 3c 01 00 00）
+[WARNING] [城防 detour] 0x…d8b6 落点校验失败，拒绝安装：落点不是 6 字节 jcc rel32。
+          （实际：15 7d c8 32 01 e8，原始：0f 84 af 01 00 00）
+```
+
+**为什么**：`GameAssembly.dll` 33661952 → 33669120 字节；`Navigate` **整体搬了 `-0x3aa60`**，
+而且函数**内部**还插入了约 `0xee` 字节 —— 连「函数内偏移」都不稳定。
+→ **判据：原生 hook 的落点不能用「绝对地址」表达，只能用「函数入口 + 指令形态」表达。**
+
+#### 现在的定位方式（三层，从硬到软）
+
+| 层 | 来源 | 为什么稳定 |
+|---|---|---|
+| ① 函数入口 | IL2CPP：`MapNavigator.Navigate` 的 `methodPointer` | 跟着 metadata 走，不跟地址走 |
+| ② 函数边界 | 已加载映像的 PE `.pdata` 二分出 `[start, end)` | 只依赖「这是个函数」 |
+| ③ 指令落点 | **Iced** 线性反汇编整个函数体，按**语义**匹配 | 匹配的是指令形态，不是地址 |
+
+**两个落点的判据**（`FriendlyNoclip/NavigateScanner.cs`）：
+
+```
+城防   ：test rX,rX ; je L ; cmp dword [rX+disp], 2 ; je L      （两分支去同一个 continue 块）
+穿友方 ：mov rC,[rsi+disp] ; test rC,rC ; je Lx ; xor edx,edx ; call f ; test al,al ; jne L
+```
+
+**顺带读出来的**（这些以前全是写死的常量）：
+
+| 值 | 来源 |
+|---|---|
+| `skip` / `pass` | 就是这两条 `jcc` 的**跳转目标**与**不跳落点**（`pass = site + 6`） |
+| `gridType` 偏移 | 城防候选里那条 `cmp` 的 `disp` |
+| `battleUnit` 偏移 | 穿友方候选里那条 `mov` 的 `disp` |
+| `selfTeamID` 栈槽 | 落点之后 `mov r32,[rsp+d]` + `cmp r32,-1` 的 `d` |
+| `obstale` / `obstalceType` / `teamID` / `battleTeam` / `ID` | IL2CPP `il2cpp_field_get_offset` |
+
+**互相印证**：`gridType`/`battleUnit` 两个偏移同时有「反汇编读出」与「IL2CPP 元数据」两个来源，
+**不一致就直接失败关闭** —— 两个独立来源互相证伪时不许猜。
+
+**失败策略**：任何一步不成立 → 记 WARNING + **放弃安装该 detour**（另一个照常），不猜、不抛异常、不让游戏崩。
+
+#### 本构建（2026-10-09）实测的新落点
+
+| 项 | 静态 VA | 说明 |
+|---|---|---|
+| `Navigate` 入口 | `0x180a52c2e` | `.pdata` 函数体 `[0x180a52c2e, 0x180a531af)` |
+| 城防 site | `0x180a52e56` | `je`（`0f 84`），skip `0x180a5300b` / pass `0x180a52e5c` |
+| 穿友方 site | `0x180a52ec9` | `jne`（`0f 85`），skip `0x180a5300b` / pass `0x180a52ecf` |
+
+> 这两个地址**只是「当时确实是这些值」的记录**，代码里不再出现它们 ——
+> 它们的作用是下次更新后一眼看出「是不是又搬家了」。
+
+#### 更新后的自检流程
+
+```bash
+cd tools/native_scan_harness && dotnet run -c Release
+```
+
+它用**真实的 `GameAssembly.dll`** 把 mod 里那几份源码跑起来（`Compile Include`，不是副本），
+断言的全是**跨构建不变式**：两种形态在函数体内唯一命中 · 两条分支的 `skip` 指向同一个
+continue 块 · `pass = site + 6` · 两个 stub 的长度（60 / 59）与出口位置/立即数。
+
+游戏更新后**先跑它** —— 扫描器不认新代码时会直接告诉你**差在哪一步**，
+而不是等游戏里 detour 静默不装。
+
+#### 离线 harness 拓出来的两个坑
+
+1. ⚠️ **`cmp r/m, imm8` 的立即数不是 `Immediate32`**：汇编器把能塞进有符号 8 位的立即数
+   编成 `83 /7 ib`，Iced 报的是 `OpKind.Immediate8to32`。只认 `Immediate32` 会让整个扫描器
+   **一处都匹配不到**（第一次跑 harness 就是这个症状）。
+2. ⚠️ **两个 hook 的「同目标」条件方向相反**：城防那条 `je` 的 null 检查与障碍判定
+   **都**去 continue 块；而穿友方那条 `je`（null 检查）去的是 `raise_exception`，
+   只有 `jne` 去 continue 块。「照抄城防的相等条件」会命中 0 处。
+
+#### ⚠️⚠️ 最大的一个坑：`methodPointer` 指向的**不是函数真身**
+
+前两个坑都是离线 harness 拓出来的；**这个坑只有实机运行才会暴露** ——
+离线扫描器在真实 DLL 上明明命中唯一，进游戏却报「命中 0 处」。
+
+**实机现场**（用 MelonMCP 在活进程里读出来的）：
+
+```
+methodPointer(Navigate) = 0x180a52b40   ← IL2CPP 的 class-init wrapper
+wrapper 的 .pdata 范围     = [0x180a52b40, 0x180a52c2e)
+真身（含两个落点）           = 0x180a52c2e   ← 紧邻的下一个 .pdata 函数
+```
+
+wrapper 做的是：把参数寄存器溢出到影子空间 → 调一堆函数确保 `MapNavigator` 已完成类初始化
+→ 写初始化标志 → **顺序落入**真身（不是 `jmp`！所以「跟进入口处的跳转」也不适用）。
+
+**判据：`methodPointer` 只是「入口」，不是「真身」。** 定位必须允许**候选 BFS**：
+
+1. `methodPointer` 指向的函数本身；
+2. 它的**下一个相邻 `.pdata` 函数**（首尾相接）—— class-init wrapper 靠这条；
+3. 函数体内的**直接跳转目标** —— 跳转 thunk / 别人装的 detour 靠这条。
+
+候选逐个用同一套形态判据去试，**唯一命中**才算数（最多试 8 个）。
+#### 启动开销：**可不计**（实测）
+
+| 项 | 实测 |
+|---|---|
+| 定位全程（首次，含 .NET JIT） | **5.74 ms**（mod 自己在日志里打的） |
+| 稳态纯计算（100 次平均） | **0.021 ms**（IL2CPP 查询 0.001 + PE/.pdata/读函数体 0.000 + Iced 反汇编+匹配 0.021） |
+| 整个 mod 初始化块（定位 + 8 个 Harmony 补丁 + Dobby 挂载 + 打日志） | 44 ms |
+| 游戏启动 | 10+ 秒 |
+
+且**懒惰**：两个 detour 开关都关时不解析；结果缓存，两个 hook 只共用一次。
+→ 「不再写死地址」的代价约 **+6 ms / 启动（≈ 0.06%）**，而换来的是「游戏更新不再静默失效」。
+（对照：旧的 `FindPattern` 全镜像签名扫描反而比它还贵。）
+
+#### 实机确认（2026-10-09）
+
+```
+[定位] methodPointer 0x…2b40 不是函数真身；真身在 0x…2c2e（静态 0x180a52c2e）—— 已按真身定位。
+[定位] MapNavigator.Navigate：入口 0x…2c2e（静态 0x180a52c2e），函数体 […2c2e,…31af) 来源=.pdata，解码 340 条指令，定位耗时 5.74 ms（每进程只做一次）
+[定位] 城防 hook：落点 …（静态 0x180a52e56，操作码 0f 84）→ skip 0x180a5300b、pass 0x180a52e5c
+[定位] 穿友方 hook：落点 …（静态 0x180a52ec9，操作码 0f 85）→ skip 0x180a5300b、pass 0x180a52ecf
+[定位] 偏移：gridType=+0x14 battleUnit=+0x18 obstale=+0x30 obstalceType=+0x10 obstacleTeam=+0x2c battleTeam=+0x58 teamID=+0x10 selfTeamID=[rsp+0xd8]（全部来自 IL2CPP 元数据）
+FriendlyNoclip 初始化完成：… 穿友方 detour=已启用，穿己墙 detour=已启用 …
+```
+
+两个落点处的内存现状也核对过（MelonMCP 读活进程）：
+
+```
+0x180a52e56: ff 25 d4 da 35 80 4c 8b 08 …   ← Dobby 的 6 字节 detour 跳转，后面仍是 mov r9,[rax]
+0x180a52ec9: ff 25 59 da 35 80 8b 84 24 …   ← 后面仍是 mov eax,[rsp+0xd8]
+```
+
+> 【教训】「离线扫得中」**不等于**「上机能定位」：
+> 地址来源（`methodPointer`）本身可能是包装器。两路都做完才算验证完毕。
+
+
 ### 2.3 「穿越不留痕」：纯托管层的两步配合
 
 **问题**：能穿之后，被穿过的格子会**丢掉占位登记** → 后续单位能踩上同一格（重叠），该格 NPC「点不动、不弹角色信息」。
@@ -793,8 +933,10 @@ MapNavigator.Navigate(battleMap, from, to, path, searched, stepLimit, selfTeamID
 
 ### 3.2 关键地址
 
-`ptrs[local] = global_method_idx - 59969`（59969 = `BattleMapData` 的 metadata `methodStart`；方法指针表 VA `0x181de3120`，文件偏移 `0x1de1720`）。
+> ⚠️ **本节表格是 2026-10-02/03 那次调查的值**（用于读懂调用链），**已被后续两次更新作废**。
+> 两个 detour 的落点不再依赖它们（§2.2h）；这里保留只为对照「当时长什么样」。
 
+`ptrs[local] = global_method_idx - 59969`（59969 = `BattleMapData` 的 metadata `methodStart`；方法指针表 VA `0x181de3120`，文件偏移 `0x1de1720`）。
 | 方法 | 地址 |
 |---|---|
 | `MapNavigator.Navigate` | `0x180a80530`（691 条指令） |
@@ -1086,13 +1228,16 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 
 | 文件 | 状态 |
 |---|---|
-| `NativeHookBase.cs` | **抽象基类** —— 安装/卸载骨架 + 共用工具（`RuntimeVa` / `EmitJumpViaR11` / `IsRel32Jcc` / `Hex`）。子类只写差异：`Tag` / `HookVa` / `HookSiteVa` / `OriginalBytes` / `ValidateSite` / `BuildStub` |
-| `FriendlyPassHook.cs` | **穿友方** ✅ 在用 —— hook `0x180a8d929`，按 `battleTeam.ID` 判队伍 |
+| `NativeHookBase.cs` | **抽象基类** —— 安装/卸载骨架 + 共用工具（`IsRel32Jcc` / `Hex`）。子类只写差异：`Tag` / `TryResolveSite` / `OriginalBytes` / `ValidateSite` / `BuildStub` |
+| **`NavigateLayout.cs`** | ★ **两个 detour 的定位源头**（§2.2h）：IL2CPP 方法指针 → `.pdata` 函数边界 → 扫描器 → 字段偏移 + 两个出口 |
+| **`NavigateScanner.cs`** | ★ **形态扫描器**（纯函数）：用 Iced 在函数体里找那两个 `jcc`，并读出 `gridType`/`battleUnit`/`selfTeamID` 偏移 |
+| **`StubFactory.cs`** | ★ 两个 stub 的**构码纯函数**（输入只有偏移 + 出口），可用真实 DLL 离线核对字节 |
+| `FriendlyPassHook.cs` | **穿友方** ✅ 在用 —— 在「存活单位判定」那条 `jne` 上装 detour（落点运行时发现），按 `battleTeam.ID` 判队伍 |
 | **`WallPassData.cs`** | **★ 穿己方城墙的核心** ✅ 在用 —— 写 `GridUnitData.passes`（§2.2c） |
 | `WallPassHook.cs` | 改 `Navigate` 的判定 ✅ 在用（随 `wall_pass` 自动安装），但**城墙功能已不再依赖它** |
 | `WallHighlightHook.cs` | 🗑️ **已删除**（commit `70e23b7`）。它已验证会崩溃且非功能所需；追溯到 `e3cd3b3`，见 §2.1 |
 | `NativeProbeLog.cs` | 回溯探针 —— **默认不启用**（每进 hook 写 112 字节 + 2s 落盘，有开销）。保留供将来排查 |
-| `NativeMemory.cs` | 模块定位 / 签名扫描 / 原生读写 / `VirtualProtect` / `WriteInt32` |
+| `NativeMemory.cs` | 模块定位 / **PE `.pdata` 函数边界** / 签名扫描 / 原生读写 / `VirtualProtect` / `WriteInt32` |
 
 **已删除**：`NativeOnEnterDetour.cs`（前提错误 + 尾调用崩溃）、`NativePatchProbe.cs`、`NativeProbe.cs`；
 开关 `native_probe` / `native_patch_probe` / `native_onenter_detour` / `allow_friendly` /
@@ -1102,6 +1247,10 @@ case 1 (范围算好) → case 2? → case 6 (重算范围) → case 7 (等点�
 **git 提交序列**：`acd50b7 initial commit` → `e8c8e65 feat: (incomplete) noclip for the friendly` → `38282f0 feat: 穿越友方 + 穿越不留痕（功能闭环）` → `98d8a17 chore: 清理配置项，只保留 4 个`。
 
 ### 6.1 两个 stub 的机器码布局（备查）
+
+> ⚠️ 下面每节标题里的地址是**当时那个构建**的。落点现在由运行时发现（§2.2h），
+> 这几个地址只用来对照「stub 是在哪条指令上挂钩的」。
+> **偏移也不再写死** —— 它们全部来自 `NavigateLayout`（数值与本表一致，所以字节布局不变）。
 
 **【穿友方】`FriendlyPassHook`**（`0x180a8d929`）
 

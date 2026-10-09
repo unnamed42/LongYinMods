@@ -257,7 +257,11 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
    签名一变，补丁就静默失效或干脆挂不上（前例见 [docs/game-internals.md](docs/game-internals.md) §2.2a
    的 `GetForceName`）。所以：① 用 `GameAssembly.dll` 的 md5 做 **AllowList（fail closed）**；
    ② 目标缺失只记日志、**绝不让游戏崩**；③ ⚠️ **默认参数型的签名变化从 `[Calls]` 看不出来**
-   （`f(go)` 与 `f(go,true)` 编译出同一个签名）—— 判定“官方修了没有”只能靠**活进程行为探针**。
+   （`f(go)` 与 `f(go,true)` 编译出同一个签名）—— 判定“官方修了没有”只能靠**活进程行为探针**；
+   ④ ⚠️ **原生 hook 的落点不要写死地址** —— 游戏一更新，代码位置（连函数内偏移）都会变，
+   写死 = 校验失败→拒绝安装→**静默失效**。改用「**函数入口（IL2CPP methodPointer）+ 指令形态**」
+   运行时定位，字段偏移与栈槽也从元数据/指令形态读。
+   见 [docs/native-hooks.md](docs/native-hooks.md) §6.1e。
    见 [docs/herovitalsfix.md](docs/herovitalsfix.md) §3 / §7。
 
 ---
@@ -310,6 +314,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | `tools/gdb_catch.sh <pid>` | 附加 gdb 抓崩溃现场 |
 | `tools/find_callers/find_callers.sh <方法名>` | 找谁调用了某方法（读 cpp2il 调用图属性，约 1.5 秒）。见 [docs/find-callers.md](docs/find-callers.md) |
 | `tools/doc_lint.py` | **文档约定检查**：`docs/*.md` 漏登记 / 悬空链接会让**提交失败**；并打印各文档字符数增量。新 clone 要 `git config core.hooksPath .githooks` 才自动生效。见 §1.1 |
+| `tools/native_scan_harness/` | **离线验证原生 hook 定位**（`dotnet run -c Release`）：用真实 `GameAssembly.dll` 跑 mod 里那几份源码，断言「形态唯一命中 / 两个 stub 字节与出口」。**游戏更新后先跑它**。见 [docs/native-hooks.md](docs/native-hooks.md) §6.1e |
 
 ---
 
@@ -322,6 +327,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 看懂游戏的原生代码（签名 / 调用图 / 汇编 / 伪代码 / metadata） | [docs/decompilation.md](docs/decompilation.md) |
 | 给游戏方法挂 Harmony 补丁 | [docs/harmony-il2cpp.md](docs/harmony-il2cpp.md) |
 | 读写原生内存、装自制 detour、用 Iced 汇编 stub | [docs/native-hooks.md](docs/native-hooks.md) |
+| **游戏更新后原生 hook 失效了**（地址变了怎么重新定位） | [docs/native-hooks.md](docs/native-hooks.md) §6.1e + 先跑 `tools/native_scan_harness/` |
 | 在活进程里探查状态、或分析崩溃 | [docs/runtime-probing.md](docs/runtime-probing.md) |
 | 往 mod 里内嵌第三方 DLL（ILRepack） | [docs/ilrepack.md](docs/ilrepack.md) |
 | **反编译别人的 mod 并重新编译**（无源码，要修它 / 改它） | [docs/mod-recompilation.md](docs/mod-recompilation.md) |

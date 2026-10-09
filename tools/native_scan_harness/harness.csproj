@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    离线验证 NavigateScanner / StubFactory —— 输入是**真实的 GameAssembly.dll**。
+    源码是直接 Compile Include 过来的（不是副本），所以测的就是将要上机运行的那段代码。
+
+        cd tools/native_scan_harness && dotnet run -c Release
+
+    游戏更新后**先跑它**：它能回答「扫描器在新构建上还找得到那两个落点吗、stub 还编得对吗」。
+
+    ⚠️ TFM 保持 net6.0（与 mod 一致），RollForward 让本机只有更高版本运行时也能直接跑。
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>enable</Nullable>
+    <LangVersion>10.0</LangVersion>
+    <AssemblyName>native_scan_harness</AssemblyName>
+    <RootNamespace>NativeScanHarness</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="PluginShim.cs" />
+    <Compile Include="../../FriendlyNoclip/NavigateScanner.cs" />
+    <Compile Include="../../FriendlyNoclip/StubAssembler.cs" />
+    <Compile Include="../../FriendlyNoclip/StubFactory.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Iced">
+      <HintPath>../../gamedir/MelonLoader/net6/Iced.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>

@@ -76,38 +76,39 @@ internal abstract class NativeHookBase
     protected abstract string Tag { get; }
 
     /// <summary>
-    /// <b>校验基准</b>的静态 VA（imagebase <c>0x180000000</c>）。
-    /// 从该地址开始读 <see cref="OriginalBytes"/>.Length 字节交给 <see cref="ValidateSite"/>。
+    /// 解析本 hook 要替换的**那条 6 字节 <c>jcc rel32</c>**（运行时地址）。
+    ///
+    /// <para>
+    /// 【为什么不写死地址】游戏一更新，<c>MapNavigator.Navigate</c> 的绝对地址就变
+    /// （2026-10 的更新：整个函数搬了 <c>-0x3aa60</c>，连函数内偏移都变了）。
+    /// 写死的落点会**静默失效** —— 正是本次事故的成因。
+    /// 所以落点改为运行时发现（见 <see cref="NavigateLayout"/>），子类只负责把结果交出来。
+    /// </para>
+    ///
+    /// <para>
+    /// 【失败即拒绝安装】返回 false 时 <paramref name="reason"/> 必须是一句人读得懂的原因；
+    /// 基类记 WARNING 后放弃安装 —— 不猜、不抛异常、不让游戏崩。
+    /// </para>
     /// </summary>
-    protected abstract ulong HookVa { get; }
+    /// <param name="site">落点的运行时地址。</param>
+    /// <param name="describe">写进安装日志的说明（含静态 VA，便于与文档对照）。</param>
+    /// <param name="reason">失败原因。</param>
+    protected abstract bool TryResolveSite(out IntPtr site, out string describe, out string reason);
+
+    /// <summary>被替换的 <c>jcc rel32</c> 的字节数（等长替换的硬要求）。</summary>
+    protected const int HookSiteLength = 6;
 
     /// <summary>
-    /// <b>hook 落点</b>的静态 VA。默认等于 <see cref="HookVa"/>。
-    ///
-    /// <para>
-    /// 【为什么需要它】有些 hook 的「校验单元」与「替换单元」不是同一条指令：
-    /// 例如 <c>cmp dword [reg+0x14], 2</c>（4 字节）+ <c>je rel32</c>（6 字节）这种形态，
-    /// 校验需要看到整个 10 字节才能确认形态正确，
-    /// 而真正被替换的只有后面那条 6 字节的 <c>je</c>。
-    /// </para>
-    ///
-    /// <para>
-    /// 早期版本把两者混为一谈，导致：
-    /// 基类从 <c>cmp</c> 处读字节、却去 <c>je</c> 处挂钩（或反之），
-    /// 校验报出「不是 cmp …（实际 83 78 14 02）」这类错位信息。
-    /// </para>
+    /// 本构建实测的落点字节，**仅供失败日志对照**（真正的地址是运行时发现的）。
+    /// 默认无。
     /// </summary>
-    protected virtual ulong HookSiteVa => HookVa;
-
-    /// <summary>落点原始字节，仅供日志展示「原始值」。</summary>
-    protected abstract byte[] OriginalBytes { get; }
+    protected virtual byte[] OriginalBytes => Array.Empty<byte>();
 
     /// <summary>
     /// 安装前校验落点字节。返回 false 则拒绝安装。
     /// <paramref name="current"/> 是运行时的实际字节（可能已被其他补丁改写）。
     /// </summary>
     protected abstract bool ValidateSite(byte[] current, out string reason);
-
     /// <summary>
     /// 构造本 hook 的 stub 机器码。
     ///
@@ -160,22 +161,24 @@ internal abstract class NativeHookBase
                 return false;
             }
 
-            // 校验基准：通常是 HookVa（指令起点）。
-            // 落点另看 HookSiteVa —— 二者可以不同（见 HookSiteVa 的注释）。
-            IntPtr checkSite = NativeMemory.StaticVaToRuntime(HookVa);
-            IntPtr site = NativeMemory.StaticVaToRuntime(HookSiteVa);
-
-            if (!NativeMemory.TryReadBytes(checkSite, OriginalBytes.Length, out byte[] current))
+            // 落点由子类在**运行时发现**（子类看 NavigateLayout，不写死地址）。
+            if (!TryResolveSite(out IntPtr site, out string describe, out string reason))
             {
-                Plugin.Log.Warning($"{Tag} 无法读取 0x{checkSite.ToInt64():x} 的字节，跳过。");
+                Plugin.Log.Warning($"{Tag} 找不到 hook 落点，拒绝安装：{reason}");
                 return false;
             }
 
-            if (!ValidateSite(current, out string reason))
+            if (!NativeMemory.TryReadBytes(site, HookSiteLength, out byte[] current))
+            {
+                Plugin.Log.Warning($"{Tag} 无法读取 0x{site.ToInt64():x} 的字节，跳过。");
+                return false;
+            }
+
+            if (!ValidateSite(current, out reason))
             {
                 Plugin.Log.Warning(
-                    $"{Tag} 0x{checkSite.ToInt64():x} 落点校验失败（落点 0x{site.ToInt64():x}），拒绝安装：{reason}" +
-                    $"（实际：{Hex(current)}，原始：{Hex(OriginalBytes)}）");
+                    $"{Tag} 0x{site.ToInt64():x} 落点校验失败，拒绝安装：{reason}" +
+                    $"（实际：{Hex(current)}；本构建原值：{Hex(OriginalBytes)}；{describe}）");
                 return false;
             }
 
@@ -234,6 +237,10 @@ internal abstract class NativeHookBase
 
             Marshal.Copy(code, 0, _stub, code.Length);
 
+            // 把 stub 的机器码反汇编进日志（受 diagnostics 门控）——
+            // 这是「模块内自检」的最后一环：出口对不对、字节长什么样，不靠外部工具就能看。
+            LogStubDisassembly(code);
+
             _hook = new NativeHook<DetourSignature>(site, _stub);
             _hook.Attach();
 
@@ -250,7 +257,7 @@ internal abstract class NativeHookBase
             string siteNow = NativeMemory.HexDump(site, 8);
 
             Plugin.LogInfo(() =>
-                $"{Tag} 已挂上 0x{HookVa:x}（运行时 0x{site.ToInt64():x}）→ stub 0x{_stub.ToInt64():x}，" +
+                $"{Tag} 已挂上 {describe} → stub 0x{_stub.ToInt64():x}，" +
                 $"跳板 0x{_hook.TrampolineHandle.ToInt64():x}。落点现状：{siteNow}");
 
             return true;
@@ -300,12 +307,6 @@ internal abstract class NativeHookBase
     }
 
     // ---- 共用工具 ----
-
-    /// <summary>把静态 VA 换算成**运行时**地址。stub 的出口必须是运行时地址。</summary>
-    protected static long RuntimeVa(ulong staticVa)
-    {
-        return (long)(ulong)NativeMemory.StaticVaToRuntime(staticVa);
-    }
 
     /// <summary>
     /// 安装后核对 stub 里每条出口跳转的实际目标。

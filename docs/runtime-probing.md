@@ -31,6 +31,11 @@
 - **批量读字段**：`inspect_unity_object`（按类型枚举实例 + 读点号路径字段，见 §7.1.2）。
 - **日志分组**：`read_logs` 带 `group_by="prefix"` 时返回**按频率排序的分组计数**，用于判断「哪条日志在刷屏」（见 §7.1.3）。
 - **UI 按钮状态**：`dump_menu_state`（枚举按钮 + 三个状态标志，见 §7.1.4）。
+- **DSH 的 MCP 桥断了时的退路**：MelonMCP 本质上是游戏进程内的 **HTTP MCP 服务端**，
+  启动日志里有 `MelonMCP HTTP server started on port 27015` → `http://127.0.0.1:27015/mcp`。
+  当 DSH 侧报 `mcp-client(longyin): server is disconnected`（而游戏确实在跑）时，
+  **直接 `curl` 这个端点**即可：先 `initialize`，再 `tools/call`。
+  ⚠️ `execute_csharp` 的脚本里**不要用局部函数**（编译不过），用 `Func<...>` 委托代替。
 - **持久化的知识库**：`get_game_knowledge` / `add_game_knowledge`。
   ⚠️ **它只用于存「游戏本身的知识」**（世界观、设定、数值规则、游戏机制这类**与 mod 开发无关**、
   且**游戏更新也大体不变**的内容）。

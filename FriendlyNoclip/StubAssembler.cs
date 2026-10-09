@@ -61,6 +61,15 @@ namespace Unnamed42.FriendlyNoclip;
 internal static class StubAssembler
 {
     /// <summary>
+    /// 出错时的出口。默认走 <see cref="Plugin.Log"/>；
+    /// **离线测试 harness 可以换成收集器**，从而在没有 MelonLoader 的环境里
+    /// 编出真实 stub 字节做核对（见 <c>tools/native_scan_harness</c>）。
+    ///
+    /// <para>构造 lambda 时**不会**求值 <c>Plugin.Log</c>，所以静态初始化顺序不成问题。</para>
+    /// </summary>
+    internal static Action<string> Report { get; set; } = message => Plugin.Log.Error(message);
+
+    /// <summary>
     /// 汇编一段 stub，返回机器码。失败返回空数组（并已记 Error 日志），调用方须据此放弃安装。
     /// </summary>
     /// <param name="tag">日志前缀（各 hook 的 <c>Tag</c>）。</param>
@@ -84,7 +93,7 @@ internal static class StubAssembler
             // —— 那意味着某个出口标签后面什么都没绑，一定会跳进垃圾地址。
             if (!asm.TryAssemble(writer, (ulong)rip, out string? error, out _))
             {
-                Plugin.Log.Error($"{tag} Iced 汇编失败（rip=0x{rip:x}）：{error}");
+                Report($"{tag} Iced 汇编失败（rip=0x{rip:x}）：{error}");
                 return Array.Empty<byte>();
             }
         }
@@ -92,7 +101,7 @@ internal static class StubAssembler
         {
             // Iced 对「漏绑标签」等结构性错误是**抛异常**而不是返回 false，
             // 所以这里必须兜住 —— 否则一个 stub 写错就会打断游戏启动。
-            Plugin.Log.Error($"{tag} Iced 汇编异常（rip=0x{rip:x}）：{e.Message}");
+                Report($"{tag} Iced 汇编异常（rip=0x{rip:x}）：{e.Message}");
             return Array.Empty<byte>();
         }
 
@@ -100,7 +109,7 @@ internal static class StubAssembler
 
         if (code.Length == 0)
         {
-            Plugin.Log.Error($"{tag} Iced 汇编产出 0 字节（rip=0x{rip:x}）。");
+            Report($"{tag} Iced 汇编产出 0 字节（rip=0x{rip:x}）。");
         }
 
         return code;

@@ -15,11 +15,10 @@ namespace Unnamed42.FriendlyNoclip;
 /// <summary>
 /// 战斗格子地图：移动时允许穿越友方单位。
 ///
-/// 【当前阶段：运行时只读探针】
-/// 真实寻路链路（已用 IL2CPP dumper 交叉验证）：
+/// 【寻路链路】（地址随构建变，这里只记关系；实际入口由 NavigateLayout 运行时向 IL2CPP 询问）：
 /// <code>
-/// BattleMapData.GetMoveRangeGrids (0x1808c8b60) --+
-/// BattleMapData.GetEmptyGrid      (0x1808c88a0) --+--> MapNavigator.Navigate (0x180a8d5a0)
+/// BattleMapData.GetMoveRangeGrids  --+
+/// BattleMapData.GetEmptyGrid       --+--> MapNavigator.Navigate（A*，本 mod 的两个 native detour 都在它里面）
 /// </code>
 /// 两个 <c>BattleMapData</c> 方法都只是薄壳，真正的过滤在 <c>MapNavigator.Navigate</c>（A*）里：
 /// <list type="bullet">
@@ -34,9 +33,9 @@ namespace Unnamed42.FriendlyNoclip;
 ///         （无论空还是站着我方单位），故它是**地形**通行表，与占位无关。</item>
 ///   <item><c>+0xd0</c>/<c>+0x118</c>：位于不可达代码（旧的错误地址），已作废。</item>
 /// </list>
-/// 【当前目标】行为实验：把 <c>Navigate</c> 内 <c>0x180a8d8da</c> 的 <c>jne</c>
-/// 强行 NOP 掉（等价于「无论占位判定结果如何都放行该方向」），看能否走出友方包围。
-/// 这是运行时内存补丁，按 <c>F9</c> 开关，重启游戏即恢复。
+/// 【两个原生 detour】由 <see cref="NavigateLayout"/> 在运行时定位落点（不写死地址）：
+/// 穿友方 = 「存活单位判定」那条 <c>jne</c>；穿己墙 = 「障碍格判定」那条 <c>je</c>。
+/// 落点与出口的推导见 <c>docs/friendlynoclip.md</c> §2.2。
 /// </summary>
 public class Plugin : MelonMod
 {
@@ -196,8 +195,10 @@ public class Plugin : MelonMod
         _harmony = new HarmonyLib.Harmony(HarmonyId);
 
         // 两个原生 detour，各自独立开关。都在 MapNavigator.Navigate 内，但 hook 点不同：
-        //   穿友方 —— 0x180a8d929（存活单位判定）
-        //   穿己墙 —— 0x180a8d8b6（障碍格判定）—— 城墙比单位判定更早被排除
+        //   穿友方 —— 「存活单位判定」那条 jne（BattleUnit.get_IsAlive 的返回值）
+        //   穿己墙 —— 「障碍格判定」那条 je（城墙比单位判定更早被排除）
+        // ⚠️ 两个落点都是**运行时发现**的（见 NavigateLayout），这里不写地址 ——
+        //    它们会随游戏更新整体搬家（2026-10 那次搬了 -0x3aa60）。
         if (NativeDetourEnabled.Value)
         {
             FriendlyPassHook.Instance.Install();
