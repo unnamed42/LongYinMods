@@ -24,6 +24,7 @@
 | 角色三维 | 详情面板与战斗 UI 用**同一套字段**；缓存挂在**角色**上而控件**共用** —— 交错切人曾显示上一个角色的值（旧构建的 bug，**官方已于 2026-10-08 修复**，机制见 §4.7）| §4 |
 | 战斗构造 | **32 个 `PlotController.*` 入口全汇到 `BattleController.PrepareBattleMap`**；可纯代码建战斗（含指定地图尺寸、重划可行区域、随时退出）| §5 |
 | ⚠️ 陷阱 | **动手前先扫一遍 §3「常见陷阱速查」**（本节原来埋在文件中部）| §3 |
+| 功法数据 | `addDamageRatio` 的 `attri[6]` / `fightSkill[9]` 下标固定；外功看 `GetSkillFightScore()`、内功/轻功/绝技看 `GetValue()` | §6 |
 
 ---
 
@@ -953,7 +954,39 @@ mod ResolvePlayerTeamID() = 0
 
 ---
 
-## 6. 记录约定
+## 6. 功法（技能）数据：字段与强度口径
+
+> 只写**字段语义**与口径；「数值怎么调、mod 的再平衡规律」在 [kungfurebalance.md](kungfurebalance.md)。
+
+**稀有度**：`KungfuSkillData.rareLv` `0~5` = 白 / 绿 / 蓝 / 紫 / 顶级 / 绝世。
+**类别**：`type` `0~8` = 内功 / 轻功 / 绝技 / 拳掌 / 剑法 / 刀法 / 长兵 / 奇门 / 射术。
+
+**`addDamageRatio`（CSV `威力系数`）是 `AttriNumData`，下标顺序固定**：
+
+| 数组 | 下标含义 |
+|---|---|
+| `attri[6]` | `[力道, 灵巧, 智力, 意志, 体质, 经脉]` |
+| `fightSkill[9]` | 下标 = `type`：`[内功,轻功,绝技,拳掌,剑法,刀法,长兵,奇门,射术]` |
+| `Hp` / `Mana` | `生命上限` / `内力` 的系数 |
+
+（反推方式：找只含单一属性的功法，看哪个下标非零。推导见 [kungfurebalance.md](kungfurebalance.md) §1。）
+
+**两个互不重叠的强度口径**：
+
+- 外功（拳掌…射术）→ `new KungfuSkillLvData(id).GetSkillFightScore()`，**结果与角色属性无关**，可当功法自身强度；
+- 内功 / 轻功 / 绝技 → `HeroSpeAddData.GetValue()`（它们的 `GetSkillFightScore()` **恒为 0**）。
+
+权重表与用法见 [kungfurebalance.md](kungfurebalance.md) §3。
+
+**活进程 what-if**：`GameDataController.kungfuSkillDataBase` 是 `Dictionary<int, KungfuSkillData>`，
+数值字段全可写；字符串用 `StringToAttriRatio()` / `StringToSpeAddData()` 解析 ——
+可以整表灌进内存再打分，不必重启（改的是内存，不落盘）。
+
+⚠️ **解析器的坑**：`威力系数` 这类字段的分隔符**只认 `;`**。原版 `id=662 伏魔铲法` 写作
+`意志1;奇门2,内力0.1`（中文逗号），游戏**静默丢弃** `奇门2` 与 `内力0.1` ——
+该功法实际只有 `意志1`，却照付 12 点内力。
+
+## 7. 记录约定
 
 - **只记与 mod 无关的游戏机制**（世界观、数值规则、内部系统）。
 - 需要具体地址/偏移的结论 → 仍写在这里，但**必须标注实测日期与构建指纹**（游戏一更新即失效）。

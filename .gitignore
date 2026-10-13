@@ -66,6 +66,10 @@ gamedir
 # 反编译产物（本地分析用，勿提交）
 output/
 
+# 功法数值再平衡：数据与产物不进 git（脚本保留）
+KungFuRebalance/*.csv
+KungFuRebalance/*.tsv
+
 UnityExplorer/
 
 # Python bytecode

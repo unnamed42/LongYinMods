@@ -17,7 +17,7 @@
 
 因此所有代码都在**两个世界之间的边界**上：托管 C# 侧（MelonLoader / Harmony / Il2CppInterop）与原生侧（`GameAssembly.dll` 里编译后的 C++）。**本项目的大部分难度来自这条边界。**
 
-### 1.1 写文档：三条硬约束（写之前先看这条）
+### 1.1 写文档：四条硬约束（写之前先看这条）
 
 **内容归位**：
 
@@ -25,7 +25,7 @@
 |---|---|
 | 不随游戏构建变的（工具命令 / 环境 / API 用法 / 踩坑 / 项目约定） | 本文件（判据）+ `docs/<专题>.md`（推导） |
 | 具体游戏地址 / 偏移 / metadata token / 调用链 / 实测行为 | `docs/<项目>.md` |
-| 游戏本身的知识（世界观 / 数值规则） | MCP 知识库 `add_game_knowledge` |
+| 游戏本身的知识（世界观 / 数值规则） | MCP 知识库 —— **先 `get_game_knowledge` 读，再 `add_game_knowledge` 写**（见 §1.2） |
 | 游戏本身的知识但**随构建变**（机制 / 组件用法 / 字段语义） | [`docs/game-internals.md`](docs/game-internals.md) |
 
 1. **不要原地 append。** 先找现有小节，找不到才新建；新建小节前先回答「这条属于哪个文件的哪一节」。
@@ -36,8 +36,34 @@
 3. **改完文档跑 `python3 tools/doc_lint.py`**：索引漏登记 / 悬空链接会让**提交失败**
    （`.githooks/pre-commit`），它还会打印每份文档的**字符数增量** —— 膨胀要看得见。
    搬走细节必须留入口，否则不是「精简」，是「藏起来」。
+4. **动手前先读已有知识。** 见 §1.2 —— 写了不读，等于没写。
 
 ---
+
+### 1.2 动手前：先读已有知识（否则知识库只进不出）
+
+**这是硬要求，不是建议。** 只规定「往哪写」而不规定「先读哪」，知识库就是个只进不出的垃圾桶 ——
+本项目真实发生过：整条功法数值再平衡链路上，agent 一次都没读过知识库，最后靠人提醒才发现。
+
+任何涉及**游戏机制 / 数值 / 字段语义**的任务，在翻 CSV、读反编译、连 MCP 之前先做这三件事：
+
+| 读什么 | 怎么读 |
+|---|---|
+| MCP 知识库全貌（有哪些类目、哪些条目） | `get_game_summary` |
+| 按主题 / 按类目精查 | `get_game_knowledge(search="…")` / `get_game_knowledge(category="…")` |
+| 游戏机制与字段语义（随构建变） | [`docs/game-internals.md`](docs/game-internals.md) |
+| 专题推导 | 本文件 §7 索引 |
+
+> ⚠️ **别裸调 `get_game_knowledge()`** —— 无参 = 全量返回，**随条目数线性膨胀**
+> （实测 17 条时已 ~19K 字符 / ~10–15K token）。一律带 `category=` 或 `search=` 收窄。
+> `get_game_summary` 随条数增长但便宜得多（17 条时 ~1.5K 字符 / ~0.6K token）——
+> 它列的是**每条记录的 key**（不是纯计数），所以条数一多也会变胖，别当 O(1) 用。
+> 想审计知识库体量/查重复条目，直接读 `gamedir/UserData/MelonMCP/game_knowledge.json`
+> （本地 JSON，不发 MCP 请求）。
+
+> ⚠️ **MCP 知识库不进 git、随重装丢失、且其他 agent 看不到它**（工具自述明说）。
+> 所以它只适合放「本机当前这份游戏安装」的即查即用事实；
+> **任何结论都必须同时落到 `docs/`** —— 那里才是可发现、可审查、可继承的地方（见 §1.1）。
 
 ## 2. 目录结构
 
@@ -49,6 +75,7 @@ LongYinMods/
 ├── gamedir -> ...         指向游戏根目录的软链接（必需，见下）
 ├── <Project>/             各 mod 的 C# 工程（csproj + 源码）
 
+├── KungFuRebalance/       功法数值再平衡（数据 + 脚本；csv/tsv 不进 git，见 docs/kungfurebalance.md）
 ├── output/                本地分析产物（**不进 git**，`.gitignore` 已忽略；各子目录见 docs/decompilation.md）
 ├── tools/                 自建脚本（gdb_catch.sh 等）
 ├── （原 MelonMCP/ 已迁出：那份 MCP 服务端的源码与文档现维护在 UnityMCP 仓库，本仓库不再包含）
@@ -324,6 +351,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 
 | 我要…… | 读 |
 |---|---|
+| **改功法数值 / 做数值再平衡**（功法表 csv、战力口径、新功法适配） | [docs/kungfurebalance.md](docs/kungfurebalance.md) |
 | 看懂游戏的原生代码（签名 / 调用图 / 汇编 / 伪代码 / metadata） | [docs/decompilation.md](docs/decompilation.md) |
 | 给游戏方法挂 Harmony 补丁 | [docs/harmony-il2cpp.md](docs/harmony-il2cpp.md) |
 | 读写原生内存、装自制 detour、用 Iced 汇编 stub | [docs/native-hooks.md](docs/native-hooks.md) |
