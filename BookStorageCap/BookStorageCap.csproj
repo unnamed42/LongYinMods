@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>BookStorageCap</AssemblyName>
+    <RootNamespace>Unnamed42.BookStorageCap</RootNamespace>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <OutputType>Library</OutputType>
+    <Deterministic>true</Deterministic>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- 显式 x64（本仓库全程 64 位假设，见 ShiftClickUpgrade.csproj 的说明）。 -->
+    <PlatformTarget>x64</PlatformTarget>
+
+    <!-- ⚠️ 不要往 Version / InformationalVersion / AssemblyMetadata 里塞构建时刻：
+         那是程序集内容，会破坏 Deterministic 与 md5 对账（AGENTS.md §3.2.0）。 -->
+    <Version>1.0.0</Version>
+    <Authors>unnamed42</Authors>
+    <Description>藏经阁上限（只改藏经阁，不碰私人存储）</Description>
+
+    <GameDir>..\gamedir</GameDir>
+    <Il2cppDir>..\gamedir\MelonLoader\Il2CppAssemblies</Il2cppDir>
+    <MelonLoaderDir>..\gamedir\MelonLoader\net6</MelonLoaderDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MelonLoader">
+      <HintPath>$(MelonLoaderDir)\MelonLoader.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(MelonLoaderDir)\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(MelonLoaderDir)\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(Il2cppDir)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(Il2cppDir)\Il2Cppmscorlib.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem.Core">
+      <HintPath>$(Il2cppDir)\Il2CppSystem.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(Il2cppDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(Il2cppDir)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="MelonLoader.MelonInfo">
+      <_Parameter1>Unnamed42.BookStorageCap.Plugin</_Parameter1>
+      <_Parameter1_TypeName>System.Type</_Parameter1_TypeName>
+      <_Parameter2>$(Description)</_Parameter2>
+      <_Parameter3>$(Version)</_Parameter3>
+      <_Parameter4>$(Authors)</_Parameter4>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>

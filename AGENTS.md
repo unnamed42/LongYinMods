@@ -372,5 +372,7 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | HeroVitalsFix | 切人后三维（生命/内力/体力）显示不刷新 —— ✅ **已被官方修复取代**（2026-10-08）；保留作为「**按指纹门控发布** + **验证官方修复**」的方法论 | [docs/herovitalsfix.md](docs/herovitalsfix.md) |
 | ForceOverflowDividend | （**第三方 mod 修复**）门派资源溢出折现 | [docs/forceoverflowdividend.md](docs/forceoverflowdividend.md) |
 | WuMingPerformanceFix | （**第三方 mod 修复**）**游戏退出时卡死 / 进程不退出** | [docs/wumingperformance-fix.md](docs/wumingperformance-fix.md) |
+| BookStorageCap | 藏经阁容量上限（**本仓自建**，已替代下面的第三方 mod）—— 只改本门派藏经阁，配置管理器可调，改完 ≤0.5 秒生效（手改 .cfg 不热加载） | [docs/expandbookstorage.md](docs/expandbookstorage.md) |
+| ExpandBookStorageMod | （**第三方 mod 分析**，已弃用）藏经阁扩容 —— **反面教材**：无门控的容器补丁把私人存储上限一起改；`maxWeight` 会被 `CountForceData`/`CountHeroData` 重算盖回 | [docs/expandbookstorage.md](docs/expandbookstorage.md) |
 
 > **通用内容写 `AGENTS.md` / `docs/<专题>.md`，项目内容写 `docs/<项目>.md`，新发现随代码改动一起更新（不是以后补）。**

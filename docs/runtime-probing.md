@@ -385,6 +385,32 @@ CoreCLR 不处理，**直接 abort**：无异常、无日志、无 coredump（�
 > `execute_csharp` 的 `timeout` 参数**也拦不住**（它目前未被使用，且执行在主线程上，
 > 无法安全中断）。只能靠预防。
 
+#### ⚠️ 同一个 REPL 的第二个「无声杀进程」路径：**猜字段名**
+
+**2026-10-18 实测（分析 ExpandBookStorageMod 时把用户正在玩的游戏搞崩了）**：
+
+```csharp
+var cls = Il2CppInterop.Runtime.Il2CppClassPointerStore<Il2Cpp.ItemListController>.NativeClassPtr;
+Il2CppInterop.Runtime.IL2CPP.il2cpp_field_get_offset(
+    Il2CppInterop.Runtime.IL2CPP.GetIl2CppField(cls, "listType"));   // ✗ 该字段不存在
+```
+
+后果：日志最后一行只有
+
+```
+[00:38:41.559] [ERROR] [Il2CppInterop] Field listType was not found on class ItemListController
+```
+
+进程随即消失 —— **之后再无任何输出**（无 quit 序列、无 stack trace），MCP 端口关闭。
+
+* **`try/catch` 兜不住**：缺失字段返回**空指针**，随后的 `il2cpp_field_get_offset(空指针)` 走原生路径，
+  不是可捕获的托管异常 —— 与上面那条栈溢出同属「只能靠预防」。
+* **判据：在 `execute_csharp` 里读字段前，先枚举、再取。** 不要拿**猜的名字**当探针 ——
+  `ItemListController` 的真名是 `itemListInteractType` / `forceItemListType` / `nowItemListType` / `targetItemList`。
+  枚举方式：先读 `output/decomp/full/Il2Cpp/<Type>.cs` 的字段列表，或遍历 `il2cpp_class_get_fields`。
+* **顺带学会分辨「崩了」还是「正常退出」**：正常退出会留下退出序列；
+  `grep -c "OnApplicationQuit" <log>` 为 0、且日志**停在某条错误行**上 ⇒ 是崩，不是退。
+
 ### 7.2 日志与文件路径
 
 - **日志**：`gamedir/MelonLoader/Latest.log`
