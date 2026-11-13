@@ -1,6 +1,8 @@
 # 反编译工作流
 
 > 归属：[`AGENTS.md`](../AGENTS.md) §4 的详细展开。
+> **流程 skill**：[`il2cpp-decompile`](../.agents/skills/il2cpp-decompile/SKILL.md) —— 照着做看它；
+> 本文件保留实测数据、工具坑与推导过程。
 > **本文件写「怎么把原生 IL2CPP 代码看明白」** —— 工具命令、分层策略、踩过的坑。
 > 具体游戏的地址 / 字段偏移 / 调用链结论写在 `docs/<项目>.md`（游戏一更新即失效）。
 

@@ -4,6 +4,8 @@
 
 > **本文件只保留「每次都要知道」的内容 + 索引。** 展开细节在 `docs/` 下分专题存放。
 > 这是**渐进披露**：先读本文件，需要时再按 §7 的索引跳到对应专题。
+> **可复用的操作流程已固化为 `.agents/skills/` 下的 skill**，任务匹配时会被自动发现 ——
+> 不必先读本文件再翻文档。改 skill 后跑 `python3 tools/doc_lint.py`（会检查 frontmatter 与索引）。
 
 ---
 
@@ -17,13 +19,14 @@
 
 因此所有代码都在**两个世界之间的边界**上：托管 C# 侧（MelonLoader / Harmony / Il2CppInterop）与原生侧（`GameAssembly.dll` 里编译后的 C++）。**本项目的大部分难度来自这条边界。**
 
-### 1.1 写文档：四条硬约束（写之前先看这条）
+### 1.1 写文档：五条硬约束（写之前先看这条）
 
 **内容归位**：
 
 | 内容 | 去哪 |
 |---|---|
 | 不随游戏构建变的（工具命令 / 环境 / API 用法 / 踩坑 / 项目约定） | 本文件（判据）+ `docs/<专题>.md`（推导） |
+| **可复用的操作流程**（反编译 / 补丁 / 探查 / 重编译 / 原生 hook / 数值再平衡） | `.agents/skills/<name>/SKILL.md`（见 §7.1） |
 | 具体游戏地址 / 偏移 / metadata token / 调用链 / 实测行为 | `docs/<项目>.md` |
 | 游戏本身的知识（世界观 / 数值规则） | MCP 知识库 —— **先 `get_game_knowledge` 读，再 `add_game_knowledge` 写**（见 §1.2） |
 | 游戏本身的知识但**随构建变**（机制 / 组件用法 / 字段语义） | [`docs/game-internals.md`](docs/game-internals.md) |
@@ -37,6 +40,12 @@
    （`.githooks/pre-commit`），它还会打印每份文档的**字符数增量** —— 膨胀要看得见。
    搬走细节必须留入口，否则不是「精简」，是「藏起来」。
 4. **动手前先读已有知识。** 见 §1.2 —— 写了不读，等于没写。
+5. **可复用的操作流程写成 skill，不要塞进本文件或 `docs/`。**
+   判据：**有「明确触发场景 + 可执行步骤 + 验收判据」才算流程**；否则它是规范（留本文件）
+   或推导（放 `docs/`）。skill 放 `.agents/skills/<name>/SKILL.md`，frontmatter 必须有
+   `name`（kebab-case，与目录同名）和 `description` —— 模型**只按这两项**决定是否加载，
+   所以 `description` 要写「什么时候用」，不是「这是什么」。
+   新增 / 改 skill 后跑 `python3 tools/doc_lint.py`（检查 frontmatter、目录名与 §7.1 索引）。
 
 ---
 
@@ -362,6 +371,25 @@ md5sum gamedir/Mods/<Project>.dll <Project>/bin/Debug/net6.0/<Project>.dll
 | 查**游戏本身**的机制（音效 / 资源 / 角色三维…） | [docs/game-internals.md](docs/game-internals.md) |
 | 遇到不认识的数值字段（是不是枚举？有哪几档？） | [docs/native-hooks.md](docs/native-hooks.md) 的「不透明字段三步排查法」 |
 | **拿不准 MelonLoader / Harmony / Unity / Il2CppInterop 该怎么用** | **先 websearch**，见 §3.5（框架有官方文档，不必挖 DLL） |
+
+### 7.1 技能索引（`.agents/skills/`）
+
+**可复用的操作流程都在这里**，任务匹配时会被自动发现（模型只按 `name` + `description` 决定加载）。
+每条 = 触发场景 → skill → 推导在哪：
+
+| 我要…… | skill | 推导 / 实测在 |
+|---|---|---|
+| 看懂游戏的原生代码（签名 / 调用图 / 汇编 / 伪代码 / metadata） | [`il2cpp-decompile`](.agents/skills/il2cpp-decompile/SKILL.md) | [docs/decompilation.md](docs/decompilation.md)、[docs/find-callers.md](docs/find-callers.md) |
+| 给 IL2CPP 托管方法挂 Harmony 补丁，或排查「挂上了却不生效」 | [`harmony-patch`](.agents/skills/harmony-patch/SKILL.md) | [docs/harmony-il2cpp.md](docs/harmony-il2cpp.md) |
+| 在活进程里读状态 / 改配置 / 验证补丁 / 排查崩溃卡死 | [`runtime-probe`](.agents/skills/runtime-probe/SKILL.md) | [docs/runtime-probing.md](docs/runtime-probing.md) |
+| 反编译**无源码**的第三方 mod 并重新编译 | [`mod-recompile`](.agents/skills/mod-recompile/SKILL.md) | [docs/mod-recompilation.md](docs/mod-recompilation.md) |
+| 读写原生内存 / 装 detour / Iced stub / 游戏更新后重定位 | [`native-hook`](.agents/skills/native-hook/SKILL.md) | [docs/native-hooks.md](docs/native-hooks.md) |
+| 给功法表定值 / 新功法适配 / 战力校准 | [`kungfu-rebalance`](.agents/skills/kungfu-rebalance/SKILL.md) | [docs/kungfurebalance.md](docs/kungfurebalance.md) |
+
+> **什么进 skill、什么不进**：只有「明确触发场景 + 可执行步骤 + 验收判据」的**流程**才进 skill（见 §1.1 第 5 条）。
+> **规范**（构建部署 / 排查顺序 / 工具安装 / 文档约定）与**单个 mod 的设计取舍**留在本文件与 `docs/`，
+> 不包装成 skill —— 否则 skill 目录会退化成第二个文档索引，反而更难发现。
+> 新增 / 删除 skill 必须同步本表，否则 `doc_lint` 报错。
 
 **各 mod 的设计与取舍**（都含 §0 判据速查，可直接跳）：
 

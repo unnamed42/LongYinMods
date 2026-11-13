@@ -1,6 +1,8 @@
 # 功法数值再平衡 —— 按 mod 既有规则给新增功法（id 996–1050）定值
 
 > 归属：[`AGENTS.md`](../AGENTS.md) §7 索引有一行指向本文件；数据与脚本在 `KungFuRebalance/`。
+> **流程 skill**：[`kungfu-rebalance`](../.agents/skills/kungfu-rebalance/SKILL.md) —— 照着做看它；
+> 本文件保留映射推导、规律来源与校准实例。
 > **读者**：要改 `KungfuSkillData.csv` 数值、或给游戏更新新增的功法补平衡的人。
 > 反编译/原生 hook 的手法**不**在这里，去 [docs/decompilation.md](decompilation.md) /
 > [docs/native-hooks.md](native-hooks.md)；游戏机制的通用探查去 [docs/game-internals.md](game-internals.md)。

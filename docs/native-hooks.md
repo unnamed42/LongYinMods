@@ -1,6 +1,8 @@
 # 原生内存与 detour
 
 > 归属：[`AGENTS.md`](../AGENTS.md) §6 的详细展开。
+> **流程 skill**：[`native-hook`](../.agents/skills/native-hook/SKILL.md) —— 照着做看它；
+> 本文件保留逐条实测事故与推导。
 > 包含：原生内存读写纪律、自建 detour 的踩坑、用 **Iced** 取代手写机器码、
 > 以及「不透明字段的三步排查法」。
 

@@ -1,6 +1,8 @@
 # 反编译第三方 mod 并重新编译（无源码）
 
 > 归属：[`AGENTS.md`](../AGENTS.md) §7 的专题展开。
+> **流程 skill**：[`mod-recompile`](../.agents/skills/mod-recompile/SKILL.md) —— 照着做看它；
+> 本文件保留完整踩坑记录与 ilspycmd 缺陷说明。
 > 适用场景：**手上只有别人的 mod DLL，没有源码**，但需要改它的行为（改 bug、加日志、关掉某个功能）。
 > 本文是**通用流程**（工具 / 命令 / 踩坑 / 为什么那样做），**不随游戏构建变**。
 >

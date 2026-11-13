@@ -1,6 +1,8 @@
 # Harmony 补丁 IL2CPP 方法
 
 > 归属：[`AGENTS.md`](../AGENTS.md) §5 的详细展开。
+> **流程 skill**：[`harmony-patch`](../.agents/skills/harmony-patch/SKILL.md) —— 照着做看它；
+> 本文件保留实测事故与推导。
 > **本项目最大的坑区** —— 挂载成功、触发、生效是三件不同的事。
 
 ---

@@ -9,6 +9,7 @@
 **错误**（退出码 1）—— 都是客观的「导航已经坏了」：
 
   * 有 `docs/*.md` 没被 `AGENTS.md` 索引到（§1.1 的红线：搬走细节必须留入口）
+  * 有 `.agents/skills/*/SKILL.md` 缺 frontmatter、`name` 与目录名不一致，或没进 §7.1 索引
   * 相对链接指向不存在的文件（悬空引用）
 
 **警告**（不阻断）—— 倾向于「该用渐进披露了」：
@@ -33,9 +34,12 @@ ROOT = None
 HANDBOOK = 'AGENTS.md'
 DOCS_DIR = 'docs'
 TEMPLATE = '_template.md'
+SKILLS_DIR = '.agents/skills'
 SUMMARY_HEADING = '## 0.'
 SUMMARY_OPT_OUT = re.compile(r'<!--\s*doc-lint:\s*no-summary\s*-->')
 SUMMARY_MIN_LINES = 400
+SKILL_NAME = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
+SKILL_DESC_MAX = 500
 
 LINK = re.compile(r'\[[^\]]*\]\(([^)\s]+)\)')
 
@@ -57,6 +61,35 @@ def read(path):
 def doc_files():
     names = sorted(os.path.basename(p) for p in glob.glob(os.path.join(ROOT, DOCS_DIR, '*.md')))
     return [n for n in names if n != TEMPLATE]
+
+
+def skill_files():
+    """返回 [(目录名, 相对路径)] —— .agents/skills 下的目录式 skill。"""
+    base = os.path.join(ROOT, SKILLS_DIR)
+    if not os.path.isdir(base):
+        return []
+    out = []
+    for entry in sorted(os.listdir(base)):
+        rel = '{}/{}/SKILL.md'.format(SKILLS_DIR, entry)
+        if os.path.isfile(os.path.join(ROOT, rel)):
+            out.append((entry, rel))
+    return out
+
+
+def parse_frontmatter(text):
+    """极简 frontmatter：只认 `key: value` 单行（够用，不引 YAML 依赖）。"""
+    if not text.startswith('---\n'):
+        return None
+    end = text.find('\n---', 4)
+    if end == -1:
+        return None
+    data = {}
+    for line in text[4:end].split('\n'):
+        if ':' not in line or line.lstrip().startswith('#'):
+            continue
+        key, _, value = line.partition(':')
+        data[key.strip()] = value.strip().strip('"').strip("'")
+    return data
 
 
 def rel_link_targets(path, text):
@@ -102,6 +135,7 @@ def main():
 
     handbook = read(HANDBOOK)
     docs = doc_files()
+    skills = skill_files()
 
     # ── 错误 1：每份 docs/*.md 都要在手册里有入口 ────────────────────────────
     for name in docs:
@@ -110,8 +144,29 @@ def main():
                 '{}/{} 没有任何入口 —— 在 {} 的索引里加一行（§1.1：「搬走细节必须留入口，'
                 '否则不是精简，是藏起来」）'.format(DOCS_DIR, name, HANDBOOK))
 
+    # ── 错误 1b：每个 skill 都要有合法 frontmatter 与手册入口 ────────────────
+    for dirname, path in skills:
+        text = read(path)
+        fm = parse_frontmatter(text)
+        if fm is None:
+            errors.append('{} 缺少 YAML frontmatter（必须有 name 与 description）'.format(path))
+            continue
+        name = fm.get('name', '')
+        desc = fm.get('description', '')
+        if not name or not desc:
+            errors.append('{} 的 frontmatter 必须同时有 name 与 description'.format(path))
+        if name and not SKILL_NAME.match(name):
+            errors.append('{} 的 name {!r} 不是 kebab-case'.format(path, name))
+        if name and name != dirname:
+            errors.append('{} 的 name {!r} 与目录名 {!r} 不一致'.format(path, name, dirname))
+        if len(desc) > SKILL_DESC_MAX:
+            warnings.append('{} 的 description 超过 {} 字符，模型目录里会被截断'.format(path, SKILL_DESC_MAX))
+        if '{}/{}/SKILL.md'.format(SKILLS_DIR, dirname) not in handbook:
+            errors.append(
+                '{} 没有任何入口 —— 在 {} §7.1 技能索引里加一行'.format(path, HANDBOOK))
+
     # ── 错误 2：悬空相对链接 ────────────────────────────────────────────────
-    sources = [HANDBOOK] + ['{}/{}'.format(DOCS_DIR, n) for n in docs]
+    sources = [HANDBOOK] + ['{}/{}'.format(DOCS_DIR, n) for n in docs] + [p for _, p in skills]
     for path in sources:
         for raw, target in rel_link_targets(path, read(path)):
             if not os.path.exists(os.path.join(ROOT, target)):
@@ -155,7 +210,9 @@ def main():
         total = 0
         grew = []
         print('== 文档体量（增量 = 工作树 vs HEAD）==')
-        rows = [(HANDBOOK, None)] + [('{}/{}'.format(DOCS_DIR, n), n) for n in docs]
+        rows = ([(HANDBOOK, None)]
+                + [('{}/{}'.format(DOCS_DIR, n), n) for n in docs]
+                + [(p, None) for _, p in skills])
         for path, _ in rows:
             here = len(read(path))
             total += here
@@ -186,7 +243,7 @@ def main():
         print('\n{} 个错误 —— 文档导航已经坏了。'.format(len(errors)))
         return 1
     if not args.quiet:
-        print('文档约定检查通过（{} 份文档）。'.format(len(docs) + 1))
+        print('文档约定检查通过（{} 份文档 / {} 个 skill）。'.format(len(docs) + 1, len(skills)))
     return 0
 
 

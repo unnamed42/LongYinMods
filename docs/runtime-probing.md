@@ -1,6 +1,8 @@
 # 运行时探查与崩溃排查
 
 > 归属：[`AGENTS.md`](../AGENTS.md) §7 的详细展开。
+> **流程 skill**：[`runtime-probe`](../.agents/skills/runtime-probe/SKILL.md) —— 照着做看它；
+> 本文件保留工具实测行为与崩溃取证细节。
 > 有活进程就别猜日志 —— 本文件讲 MCP 探查与崩溃取证。
 > 本文件是**使用**视角（工具清单 + 使用注意）。
 
